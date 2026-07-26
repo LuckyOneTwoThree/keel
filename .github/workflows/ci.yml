@@ -1,0 +1,31 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+
+jobs:
+  check:
+    name: 校验 + 测试
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: 跑 check.py 全量校验
+        run: python scripts/check.py
+
+      - name: 安装 pytest(可选)
+        run: pip install pytest
+        continue-on-error: true
+
+      - name: 跑单元测试
+        run: |
+          # 优先用 pytest,回退到直接跑
+          python -m pytest scripts/test_check.py scripts/test_pm.py -v 2>/dev/null || \
+          python scripts/test_check.py && python scripts/test_pm.py

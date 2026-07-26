@@ -1,15 +1,15 @@
 ---
-id: PRD-Node产品总纲
-type: prd
+id: REQ-0001
+type: req
 title: Node 产品总纲
 date: 2026-07-09
-status: 定稿
+status: 已验收
 proj_id: PROJ-Node-PoC
 related: [DEC-0005]
 related_external: []
 ---
 
-# PRD-Node产品总纲
+# REQ-0001-PRD Node 产品总纲
 
 > 真相源 · PoC 精简版(仅作引用目标,正文从略)。
 

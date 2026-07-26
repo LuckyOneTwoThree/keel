@@ -11,7 +11,7 @@ PM-Playbook v3.0 CLI 门面
   check              调 check.py + 打印人话报错 + "下一步"启发式
   commit "信息"      校验 + git commit + Approved-by trailer
   brief              重聚简报(三级回退锚点:SESSION→git log→mtime)
-  doctor             自检环境(Python/git/hook/schema)
+  doctor [--fix]      自检环境(Python/git/hook/schema),--fix 自动安装 pre-commit hook
   finalize <id>      draft:true → false,跑全量校验
 
 设计哲学(D4): pm.py 只放"生成便利",校验真理全部独占在 check.py。
@@ -45,6 +45,7 @@ TYPE_FILE = {
     "rsk": "项目管理/风险登记册.md",
     "dep": "项目管理/依赖登记册.md",
     "kb":  "记忆/知识库.md",
+    "gkb": "_共享/知识库/全局知识库.md",  # GKB 是 workspace 级
 }
 
 # ============ 工具函数 ============
@@ -67,28 +68,26 @@ def get_project_arg():
     return find_project_dir()
 
 def run(cmd, cwd=None, capture=True):
-    """跑子进程,返回 (returncode, stdout, stderr)"""
-    result = subprocess.run(
-        cmd, shell=True, cwd=cwd,
-        capture_output=capture, text=True, encoding="utf-8"
-    )
+    """跑子进程,返回 (returncode, stdout, stderr)。
+    cmd 为字符串时 shell=True;为列表时 shell=False(避免命令注入)"""
+    if isinstance(cmd, list):
+        result = subprocess.run(
+            cmd, shell=False, cwd=cwd,
+            capture_output=capture, text=True, encoding="utf-8"
+        )
+    else:
+        result = subprocess.run(
+            cmd, shell=True, cwd=cwd,
+            capture_output=capture, text=True, encoding="utf-8"
+        )
     return result.returncode, result.stdout, result.stderr
 
 def parse_frontmatter_simple(content):
-    """简单解析 frontmatter,返回 dict"""
-    if not content.startswith("---"):
-        return {}
-    parts = content.split("---", 2)
-    if len(parts) < 3:
-        return {}
-    fm = {}
-    for line in parts[1].strip().split("\n"):
-        if ":" in line:
-            key, _, val = line.partition(":")
-            key = key.strip()
-            val = val.strip().strip("'\"")
-            fm[key] = val
-    return fm
+    """解析 frontmatter,返回 dict。
+    委托给 check.py 的 parse_frontmatter(认 block 列表/True/yes,消除重复)"""
+    from check import parse_frontmatter
+    fm, _ = parse_frontmatter(content)
+    return fm or {}
 
 def is_derived_file(fpath):
     """检查是否是派生文件(豁免编号扫描)"""
@@ -99,12 +98,51 @@ def is_derived_file(fpath):
     except:
         return False
 
+def replace_draft_flag(content, target_id):
+    """在含 target_id 的 frontmatter 块里把 draft: true → false。
+    避免多条目文件里误改其他条目的 draft 字段(P0-1 修法)。
+    返回 (new_content, replaced: bool)"""
+    lines = content.split("\n")
+    # 找 target_id 所在行
+    id_line_idx = None
+    for i, line in enumerate(lines):
+        stripped = line.strip()
+        if stripped == f"id: {target_id}" or stripped == f"id:{target_id}":
+            id_line_idx = i
+            break
+    if id_line_idx is None:
+        return content, False
+    # 向前找 --- (块开始)
+    block_start = None
+    for i in range(id_line_idx, -1, -1):
+        if lines[i].strip() == "---":
+            block_start = i
+            break
+    if block_start is None:
+        return content, False
+    # 向后找 --- (块结束)
+    block_end = None
+    for i in range(id_line_idx + 1, len(lines)):
+        if lines[i].strip() == "---":
+            block_end = i
+            break
+    if block_end is None:
+        return content, False
+    # 在 block_start 到 block_end 范围内替换 draft: true → false
+    for i in range(block_start, block_end + 1):
+        if "draft: true" in lines[i]:
+            lines[i] = lines[i].replace("draft: true", "draft: false", 1)
+            return "\n".join(lines), True
+    return content, False
+
 def scan_max_id(project_dir, prefix):
     """扫项目所有 .md,找某前缀的最大编号"""
     max_num = 0
     pattern = re.compile(rf"\b{prefix}-(\d{{4}})\b")
     for root, dirs, files in os.walk(project_dir):
-        if ".draft" in root or "归档" in root:
+        # 跳过 .draft/ (草稿区)
+        # 归档/ 不跳过——归档条目的编号仍是真编号,防重用
+        if ".draft" in Path(root).parts:
             continue
         for f in files:
             if not f.endswith(".md"):
@@ -255,12 +293,15 @@ def cmd_new(args):
             return 1
 
     project_dir = get_project_arg()
-    if not project_dir:
+    # GKB 是 workspace 级,不需要 project_dir
+    if not project_dir and entry_type != "gkb":
         print("错误: 未找到项目目录。请在项目内运行,或用 -p <项目路径>")
         return 1
 
     prefix = TYPE_PREFIX[entry_type]
-    max_num = scan_max_id(project_dir, prefix)
+    # GKB 用 WORKSPACE_ROOT 扫描和写入;其他用 project_dir
+    base_dir = WORKSPACE_ROOT if entry_type == "gkb" else project_dir
+    max_num = scan_max_id(base_dir, prefix)
     new_num = max_num + 1
     new_id = f"{prefix}-{new_num:04d}"
     today = date.today().isoformat()
@@ -279,8 +320,20 @@ def cmd_new(args):
     ]
     if entry_type == "dec" or entry_type == "rsk":
         fm_lines.append("review_due: ")
+    if entry_type == "rsk":
+        fm_lines.append("level: 中")  # 默认中,PM 后续调整
     fm_lines.append("---")
     fm_text = "\n".join(fm_lines)
+
+    # TOCTOU 二次校验:写入前重跑 scan_max_id(防并发写入编号冲突,写入协议 §5)
+    max_num_final = scan_max_id(base_dir, prefix)
+    if max_num_final >= new_num:
+        # 编号已被占用(并发写入),自动重新计算
+        new_num = max_num_final + 1
+        new_id = f"{prefix}-{new_num:04d}"
+        fm_lines[1] = f"id: {new_id}"
+        fm_text = "\n".join(fm_lines)
+        print(f"⚠️  检测到编号冲突,已自动调整为 {new_id}")
 
     # 决定写入位置
     if entry_type == "req":
@@ -298,7 +351,7 @@ def cmd_new(args):
     else:
         # 多条目文件,prepend 到顶部(最新在顶)
         rel_path = TYPE_FILE[entry_type]
-        target_file = project_dir / rel_path
+        target_file = base_dir / rel_path
         if not target_file.exists():
             print(f"错误: 目标文件不存在: {target_file}")
             return 1
@@ -327,7 +380,7 @@ def cmd_check(args):
     if not project_dir:
         print("错误: 未找到项目目录")
         return 1
-    rc, out, err = run(f'python "{CHECK_PY}" "{project_dir}"')
+    rc, out, err = run([sys.executable, CHECK_PY, str(project_dir)])
     print(out)
     if err:
         print("stderr:", err)
@@ -363,21 +416,25 @@ def cmd_commit(args):
 
     # 先校验
     print("🔍 校验中...")
-    rc, out, _ = run(f'python "{CHECK_PY}" "{project_dir}"')
+    rc, out, _ = run([sys.executable, CHECK_PY, str(project_dir)])
     if rc == 1:
         print("❌ 校验失败,拒绝 commit:")
         print(out)
         print("\n💡 修复后重试,或 pm finalize draft 条目")
         return 1
 
-    # git add + commit
-    # trailer 用 git commit -m 多行实现
+    # git add 当前项目变更(精准 add,不 add 全仓库——违反"一条条目=一个 commit"的根源修复)
+    # 找项目相对仓库根的路径(git 需要 / 分隔符)
+    project_rel = os.path.relpath(project_dir, WORKSPACE_ROOT).replace("\\", "/")
+    run(["git", "add", project_rel], cwd=WORKSPACE_ROOT)
+
+    # commit(shell=False,避免命令注入)
     full_msg = f"{msg}\n\nApproved-by: PM\nReviewed-by: agent"
-    rc, out, err = run(f'git add -A && git commit -m "{full_msg}"', cwd=WORKSPACE_ROOT)
+    rc, out, err = run(["git", "commit", "-m", full_msg], cwd=WORKSPACE_ROOT)
     if rc == 0:
         print(f"✅ 已 commit: {msg}")
         # 显示 commit hash
-        rc2, hash_, _ = run("git rev-parse --short HEAD", cwd=WORKSPACE_ROOT)
+        rc2, hash_, _ = run(["git", "rev-parse", "--short", "HEAD"], cwd=WORKSPACE_ROOT)
         if rc2 == 0:
             print(f"   hash: {hash_.strip()}")
     else:
@@ -423,7 +480,7 @@ def cmd_brief(args):
         latest_mtime = None
         latest_file = None
         for root, dirs, files in os.walk(project_dir):
-            if ".draft" in root:
+            if ".draft" in Path(root).parts:
                 continue
             for f in files:
                 if not f.endswith(".md"):
@@ -450,7 +507,7 @@ def cmd_brief(args):
 
     # 扫所有条目
     for root, dirs, files in os.walk(project_dir):
-        if ".draft" in root or "归档" in root:
+        if ".draft" in Path(root).parts or "归档" in Path(root).parts:
             continue
         for f in files:
             if not f.endswith(".md"):
@@ -513,7 +570,8 @@ def cmd_brief(args):
     return 0
 
 def cmd_doctor(args):
-    """pm doctor  自检环境"""
+    """pm doctor [--fix]  自检环境,--fix 自动安装 pre-commit hook"""
+    fix_mode = "--fix" in args
     print("🔧 PM-Playbook 环境自检")
     print()
 
@@ -528,7 +586,7 @@ def cmd_doctor(args):
         issues.append("python")
 
     # git
-    rc, out, _ = run("git --version")
+    rc, out, _ = run(["git", "--version"])
     if rc == 0:
         print(f"  ✅ git: {out.strip()}")
     else:
@@ -544,12 +602,30 @@ def cmd_doctor(args):
 
     # git hook
     hook_path = WORKSPACE_ROOT / ".git" / "hooks" / "pre-commit"
+    source_hook = WORKSPACE_ROOT / "scripts" / "pre-commit"
     if hook_path.exists():
         print(f"  ✅ pre-commit hook: 已安装")
     else:
-        print(f"  ⚠️  pre-commit hook: 未安装")
-        print(f"     安装命令: cp scripts/pre-commit .git/hooks/pre-commit && chmod +x .git/hooks/pre-commit")
-        issues.append("hook")
+        if fix_mode and source_hook.exists():
+            import shutil
+            try:
+                hook_path.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(source_hook, hook_path)
+                # Unix 设置可执行权限(Windows 不需要)
+                import stat
+                os.chmod(hook_path, os.stat(hook_path).st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
+                print(f"  ✅ pre-commit hook: 已自动安装(--fix)")
+            except Exception as e:
+                print(f"  ❌ pre-commit hook: 安装失败 {e}")
+                issues.append("hook")
+        else:
+            print(f"  ⚠️  pre-commit hook: 未安装")
+            if source_hook.exists():
+                print(f"     自动安装: pm doctor --fix")
+                print(f"     手动安装: cp scripts/pre-commit .git/hooks/pre-commit")
+            else:
+                print(f"     scripts/pre-commit 不存在")
+            issues.append("hook")
 
     # 当前项目
     project_dir = get_project_arg()
@@ -577,6 +653,8 @@ def cmd_doctor(args):
     print()
     if issues:
         print(f"❌ 发现 {len(issues)} 个问题: {issues}")
+        if "hook" in issues and not fix_mode:
+            print("💡 跑 `pm doctor --fix` 可自动安装 pre-commit hook")
         return 1
     else:
         print("✅ 环境就绪")
@@ -596,7 +674,8 @@ def cmd_finalize(args):
     # 找条目所在文件
     found = False
     for root, dirs, files in os.walk(project_dir):
-        if "归档" in root:
+        # 归档里的条目不应再定稿(归档=已完成)
+        if "归档" in Path(root).parts:
             continue
         for f in files:
             if not f.endswith(".md"):
@@ -611,8 +690,10 @@ def cmd_finalize(args):
                 continue
             if "draft: true" not in content:
                 continue
-            # 替换 draft: true → false
-            new_content = content.replace("draft: true", "draft: false", 1)
+            # 按块定位替换(避免多条目文件里误改其他条目,P0-1 修法)
+            new_content, replaced = replace_draft_flag(content, target_id)
+            if not replaced:
+                continue
             # 如果是 .draft/ 下的 PRD,移到正式位
             if ".draft" in fpath and "-req-" in f:
                 # draft-req-0007-prd.md → REQ-0007-PRD.md
@@ -623,6 +704,11 @@ def cmd_finalize(args):
                     target_dir = project_dir / "文档库" / "01-需求"
                     target_dir.mkdir(parents=True, exist_ok=True)
                     target_path = target_dir / new_name
+                    # 覆盖检查:目标已存在则拒绝(避免静默覆盖,P1-F 修法)
+                    if target_path.exists():
+                        print(f"❌ 目标已存在,拒绝覆盖: {target_path}")
+                        print(f"   先手动处理现有文件再 finalize")
+                        return 1
                     with open(target_path, "w", encoding="utf-8") as fp:
                         fp.write(new_content)
                     os.remove(fpath)
@@ -645,7 +731,7 @@ def cmd_finalize(args):
 
     # 定稿后跑校验
     print("\n🔍 全量校验中...")
-    rc, out, _ = run(f'python "{CHECK_PY}" "{project_dir}"')
+    rc, out, _ = run([sys.executable, CHECK_PY, str(project_dir)])
     print(out)
     if rc == 1:
         print("⚠️  定稿后校验失败(可能含悬空引用等),请修复后 pm commit")

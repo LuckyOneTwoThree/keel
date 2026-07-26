@@ -70,6 +70,14 @@ ALLOWED_STATUS = {
 # 必填字段(所有类型)
 REQUIRED_FIELDS = ["id", "type", "title", "date", "status"]
 
+# 类型特定必填字段
+TYPE_REQUIRED_FIELDS = {
+    "rsk": ["level"],  # 风险等级:高/中/低
+}
+
+# RSK level 允许值
+ALLOWED_LEVEL = {"高", "中", "低"}
+
 # 派生文件标记(豁免悬空校验)
 DERIVED_MARKERS = ["derived: true", "type: 现状", "type: 路线图"]
 
@@ -81,7 +89,8 @@ DRAFT_BLOCK_DAYS = 14
 
 def parse_frontmatter(content):
     """解析 YAML frontmatter。返回 (frontmatter_dict, body)。
-    简单解析:只认 --- 包围块,不依赖 PyYAML(可移植性)。"""
+    支持:内联列表 [a, b]、block 列表(缩进 - )、True/yes/False/no 归一化。
+    不依赖 PyYAML(可移植性)。"""
     if not content.startswith("---"):
         return None, content
     parts = content.split("---", 2)
@@ -90,17 +99,38 @@ def parse_frontmatter(content):
     fm_text = parts[1].strip()
     body = parts[2]
     fm = {}
-    for line in fm_text.split("\n"):
-        line = line.strip()
-        if not line or line.startswith("#"):
+    lines = fm_text.split("\n")
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            i += 1
             continue
-        if ":" not in line:
+        if ":" not in stripped:
+            i += 1
             continue
-        key, _, val = line.partition(":")
+        key, _, val = stripped.partition(":")
         key = key.strip()
         val = val.strip()
-        # 处理 [a, b, c] 列表
+        if val == "":
+            # 值为空:检查下一行是否是 block 列表项
+            if i + 1 < len(lines) and lines[i + 1].strip().startswith("- "):
+                items = []
+                j = i + 1
+                while j < len(lines) and lines[j].strip().startswith("- "):
+                    item_val = lines[j].strip()[2:].strip().strip("'\"")
+                    items.append(item_val)
+                    j += 1
+                fm[key] = items
+                i = j
+                continue
+            else:
+                fm[key] = ""
+                i += 1
+                continue
         if val.startswith("[") and val.endswith("]"):
+            # 内联列表 [a, b, c]
             inner = val[1:-1].strip()
             if inner:
                 items = [x.strip().strip("'\"") for x in inner.split(",")]
@@ -108,8 +138,16 @@ def parse_frontmatter(content):
             else:
                 fm[key] = []
         else:
-            # 去引号
-            fm[key] = val.strip("'\"")
+            # 标量值:True/yes → "true",False/no → "false"
+            # (保持字符串,与现有 check_draft_aging 等逻辑兼容)
+            low = val.lower().strip("'\"")
+            if low in ("true", "yes"):
+                fm[key] = "true"
+            elif low in ("false", "no"):
+                fm[key] = "false"
+            else:
+                fm[key] = val.strip("'\"")
+        i += 1
     return fm, body
 
 def find_entries(project_dir):
@@ -118,14 +156,19 @@ def find_entries(project_dir):
     entries = []
     md_files = []
     for root, dirs, files in os.walk(project_dir):
-        # 跳过 .draft/ 和 归档/
-        if ".draft" in root or "归档" in root:
+        # 跳过 .draft/ (草稿区,非真条目)
+        # 归档/ 不跳过——归档条目仍是真相源,参与编号唯一性校验
+        # (防分片归档后编号重用,详见设计方案 v3.0 §10)
+        if ".draft" in Path(root).parts:
             continue
         for f in files:
             # 跳过 _模板.md(文档库母版,非真条目)
             if f.endswith(".md") and f != "_模板.md":
                 md_files.append(os.path.join(root, f))
     for fpath in md_files:
+        # 跳过派生文件(现状/INDEX 等,编号是示例非真条目)
+        if is_derived_file(fpath):
+            continue
         try:
             with open(fpath, encoding="utf-8") as fp:
                 content = fp.read()
@@ -182,33 +225,13 @@ def check_unique_ids(entries, project_name):
     return errors
 
 def check_continuity(entries, project_name):
-    """编号连续性(建议 max+1)。仅警告。"""
-    warnings = []
-    # 按类型分组,检查是否跳号
-    by_type = {}
-    for e in entries:
-        t = e["entry_type"]
-        if t not in TYPE_PREFIX:
-            continue
-        by_type.setdefault(t, []).append(e["entry_id"])
-    for t, ids in by_type.items():
-        prefix = TYPE_PREFIX[t]
-        nums = []
-        for eid in ids:
-            m = re.match(rf"^{prefix}-(\d+)$", eid)
-            if m:
-                nums.append(int(m.group(1)))
-        nums.sort()
-        # 找跳号
-        for i in range(1, len(nums)):
-            if nums[i] != nums[i-1] + 1:
-                gap = nums[i] - nums[i-1]
-                warnings.append(
-                    f"[{project_name}] {prefix}- 编号跳号: "
-                    f"{prefix}-{nums[i-1]:04d} → {prefix}-{nums[i]:04d} "
-                    f"(跳过 {gap-1} 个)"
-                )
-    return warnings
+    """编号连续性(建议 max+1)。
+
+    已降级为静默:作废/砍需求/草稿删除都会导致合法跳号,
+    唯一性校验(check_unique_ids)已足够检测真问题(重复编号)。
+    保留函数以备将来需要,但 check_project 不再调用。
+    """
+    return []
 
 def check_status_enum(entries, project_name):
     """状态枚举。硬阻断。"""
@@ -218,10 +241,14 @@ def check_status_enum(entries, project_name):
         if t not in ALLOWED_STATUS:
             continue
         status = e["fm"].get("status", "")
-        # 已作废(误)→XXX 这种带后缀的状态
+        # 带后缀的状态(已作废/已推翻/已晋升 系列)豁免枚举校验
         if status.startswith("已作废(误)→"):
             continue
         if status.startswith("已作废(PM拒绝)"):
+            continue
+        if status.startswith("已推翻→"):
+            continue
+        if status.startswith("已晋升→"):
             continue
         if status not in ALLOWED_STATUS[t]:
             errors.append(
@@ -257,6 +284,40 @@ def check_date_format(entries, project_name):
                 f"  date: '{d}' (应为 YYYY-MM-DD)\n"
                 f"  文件: {e['file']}"
             )
+    return errors
+
+def check_type_fields(entries, project_name):
+    """类型特定字段校验。硬阻断。
+    - RSK: level 必填,取值 高/中/低
+    - 作废状态豁免(与 check_status_enum 一致)
+    """
+    errors = []
+    for e in entries:
+        t = e["entry_type"]
+        status = e["fm"].get("status", "")
+        # 作废状态豁免
+        if status.startswith("已作废"):
+            continue
+        # 类型特定必填字段
+        required = TYPE_REQUIRED_FIELDS.get(t, [])
+        for field in required:
+            val = e["fm"].get(field, "")
+            if not val:
+                errors.append(
+                    f"[{project_name}] 类型字段缺失: {e['entry_id']}\n"
+                    f"  {t} 类型必填字段: {field}\n"
+                    f"  文件: {e['file']}"
+                )
+        # RSK level 枚举校验
+        if t == "rsk":
+            level = e["fm"].get("level", "")
+            if level and level not in ALLOWED_LEVEL:
+                errors.append(
+                    f"[{project_name}] RSK level 枚举非法: {e['entry_id']}\n"
+                    f"  level: '{level}'\n"
+                    f"  允许: {ALLOWED_LEVEL}\n"
+                    f"  文件: {e['file']}"
+                )
     return errors
 
 def check_dangling_refs(entries, project_name):
@@ -366,6 +427,7 @@ def check_project(project_dir, project_name=None):
     # 硬阻断校验
     errors += check_unique_ids(entries, project_name)
     errors += check_required_fields(entries, project_name)
+    errors += check_type_fields(entries, project_name)
     errors += check_status_enum(entries, project_name)
     errors += check_date_format(entries, project_name)
     dangling_err, dangling_warn = check_dangling_refs(entries, project_name)
@@ -400,6 +462,10 @@ def main():
             print(f"错误: 项目目录不存在: {projects_dir}")
             return 2
         projects = [(d.name, d) for d in projects_dir.iterdir() if d.is_dir() and not d.name.startswith(".")]
+        # 加上 workspace 级 GKB(全局知识库,在 _共享/知识库/ 下)
+        gkb_dir = WORKSPACE_ROOT / "_共享" / "知识库"
+        if gkb_dir.exists():
+            projects.append(("_共享(全局知识库)", gkb_dir))
 
     all_errors = []
     all_warnings = []

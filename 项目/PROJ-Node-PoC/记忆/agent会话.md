@@ -1,3 +1,10 @@
+---
+type: session_log
+title: agent 会话
+date: 2026-07-24
+derived: false
+---
+
 # agent 会话(短时记忆)
 
 > append-only · 享只追加保护 · 跨会话延续。

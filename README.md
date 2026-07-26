@@ -8,7 +8,7 @@
 > - 真实使用方式:克隆本框架 → `pm init PROJ-你的项目名` → 在 `项目/PROJ-你的项目名/` 内干活
 
 ## 核心心智
-**四条地基约束**(详见 [_共享/PM工作宪章.md](file:///d:/HelloWorld/Company_Project/PM-Playbook/_共享/PM工作宪章.md)):
+**四条地基约束**(详见 [_共享/PM工作宪章.md](_共享/PM工作宪章.md)):
 1. 单一真相源(派生文件标 `derived: true`,可重建)
 2. 只追加不回改(推翻只改状态字段)
 3. 时间轴优先(ISO 日期,最新在顶)
@@ -22,9 +22,10 @@
 ## v3.0 核心设施
 - `scripts/check.py` 校验层(唯一强制力,pre-commit hook 调用)
 - `scripts/pm.py` CLI 门面(PM 永不敲裸 git/frontmatter)
+- `scripts/pre-commit` git hook(首次使用跑 `pm doctor --fix` 自动安装)
 - 项目根 `.draft/` 草稿区(agent 起草用,PM 直写不经)
 - `记忆/agent会话.md` 短时记忆(跨会话延续)
-- 条目 frontmatter schema(正文不重复字段,详见 [写入协议.md](file:///d:/HelloWorld/Company_Project/PM-Playbook/_共享/写入协议.md))
+- 条目 frontmatter schema(正文不重复字段,详见 [写入协议.md](_共享/写入协议.md))
 
 ## 我要做 X,该去哪?
 | 我想… | 去… |
@@ -41,11 +42,12 @@
 | 查方法论 | `_共享/知识库/全局知识库.md` (GKB-) |
 | 校验工作区 | `pm check` |
 | 自检环境 | `pm doctor` |
+| 安装 pre-commit hook | `pm doctor --fix` |
 
 ## 编号速查
 REQ 需求 / PRG 进度 / DEC 决策 / COM 沟通 / KB 本地知识 / RSK 风险 / DEP 依赖 / GKB 全局知识。
 前缀+4 位,各类独立递增(per-project 作用域)。跨项目用 `REQ-0007@PROJ-灯塔`。
-不确定写哪里时先查 [_共享/AGENTS.md](file:///d:/HelloWorld/Company_Project/PM-Playbook/_共享/AGENTS.md) 路由表。
+不确定写哪里时先查根目录 [AGENTS.md](AGENTS.md) 路由表(完整契约见 [_共享/AGENTS.md](_共享/AGENTS.md))。
 
 ## 确认门(L0-L3)
 | 级别 | 操作 | agent 行为 | PM 行为 |

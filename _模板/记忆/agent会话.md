@@ -1,3 +1,10 @@
+---
+type: session_log
+title: agent 会话
+date: 2026-07-25
+derived: false
+---
+
 # agent 会话 (SESSION-)
 
 > v3.0 §2.5 · 短时记忆。跨会话延续 agent 工作流状态。
