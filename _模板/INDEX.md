@@ -3,6 +3,7 @@ derived: true
 type: index
 title: 跨类全景索引
 date: 2026-07-25
+proj_id: PROJ-XXX
 ---
 
 # INDEX(轻量·按需)

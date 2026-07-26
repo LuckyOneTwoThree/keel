@@ -667,7 +667,237 @@ def test_doc_ref_filename_no_num_in_name_skip(tmp_path):
     assert check_doc_ref_filename_consistency(tmp_path, "TEST") == []
 
 
+# ========== P2-13/P2-14:全 subtype 夹具补全 ==========
+
+# 参数化:5 种非 report subtype × filename/location 一致性
+# (report 子类型不校验文件名/位置,见 SUBTYPE_NAMING)
+SUBTYPE_FIXTURES = [
+    # (subtype, expected_filename_fragment, expected_dir_name)
+    ("prd",        "PRD",  "01-需求"),
+    ("research",   "调研", "02-调研"),
+    ("plan",       "方案", "03-方案"),
+    ("review",     "评审", "04-评审"),
+    ("acceptance", "验收", "05-验收"),
+]
+
+
+def test_doc_filename_subtype_all_match(tmp_path):
+    """P2-13:全部 5 种非 report subtype 的文件名片段匹配通过(参数化夹具)"""
+    from check import check_doc_filename_subtype
+    for subtype, fragment, _ in SUBTYPE_FIXTURES:
+        d = tmp_path / subtype
+        d.mkdir()
+        # 文件名含期望片段(如 REQ-0001-PRD.md / REQ-0001-调研.md)
+        (d / f"REQ-0001-{fragment}.md").write_text(
+            f"---\ntype: doc\nsubtype: {subtype}\n---\n# 标题\n", encoding="utf-8"
+        )
+    warns = check_doc_filename_subtype(tmp_path, "TEST")
+    assert warns == [], f"应通过但报: {warns}"
+
+
+def test_doc_filename_subtype_all_mismatch(tmp_path):
+    """P2-13:全部 5 种 subtype 文件名缺片段时各产 1 条警告"""
+    from check import check_doc_filename_subtype
+    for subtype, fragment, _ in SUBTYPE_FIXTURES:
+        d = tmp_path / subtype
+        d.mkdir()
+        # 文件名不含期望片段(用"文件.md"占位)
+        (d / "REQ-0001-文件.md").write_text(
+            f"---\ntype: doc\nsubtype: {subtype}\n---\n# 标题\n", encoding="utf-8"
+        )
+    warns = check_doc_filename_subtype(tmp_path, "TEST")
+    assert len(warns) == 5
+    # 每条警告应包含期望片段
+    for _, fragment, _ in SUBTYPE_FIXTURES:
+        assert any(fragment in w for w in warns), f"警告缺片段 '{fragment}'"
+
+
+def test_doc_location_subtype_all_match(tmp_path):
+    """P2-13:全部 5 种 subtype 在期望目录下通过(参数化夹具)"""
+    from check import check_doc_location_subtype
+    for subtype, fragment, expected_dir in SUBTYPE_FIXTURES:
+        # 在 文档库/<expected_dir>/ 下放文件
+        d = tmp_path / "文档库" / expected_dir
+        d.mkdir(parents=True)
+        (d / f"REQ-0001-{fragment}.md").write_text(
+            f"---\ntype: doc\nsubtype: {subtype}\n---\n# 标题\n", encoding="utf-8"
+        )
+    warns = check_doc_location_subtype(tmp_path, "TEST")
+    assert warns == [], f"应通过但报: {warns}"
+
+
+def test_doc_location_subtype_all_mismatch(tmp_path):
+    """P2-13:全部 5 种 subtype 错放在 06-会议/ 下各产 1 条警告"""
+    from check import check_doc_location_subtype
+    wrong_dir = tmp_path / "文档库" / "06-会议"
+    wrong_dir.mkdir(parents=True)
+    for subtype, fragment, expected_dir in SUBTYPE_FIXTURES:
+        (wrong_dir / f"REQ-0001-{fragment}.md").write_text(
+            f"---\ntype: doc\nsubtype: {subtype}\n---\n# 标题\n", encoding="utf-8"
+        )
+    warns = check_doc_location_subtype(tmp_path, "TEST")
+    assert len(warns) == 5
+    # 每条警告应包含期望目录名
+    for _, _, expected_dir in SUBTYPE_FIXTURES:
+        assert any(expected_dir in w for w in warns), f"警告缺目录 '{expected_dir}'"
+
+
+def test_doc_subtype_report_skips_filename_and_location(tmp_path):
+    """P2-13:report subtype 同时豁免 filename + location 校验
+
+    场景:周报文件名不带 PRD/调研/方案/评审/验收 任意片段,
+    且不在 01-需求~/05-验收/ 任意目录,仍应通过。
+    """
+    from check import check_doc_filename_subtype, check_doc_location_subtype
+    # report 在 文档库/07-报告/ 下,文件名仅日期+周报
+    d = tmp_path / "文档库" / "07-报告"
+    d.mkdir(parents=True)
+    (d / "2026-07-25-周报.md").write_text(
+        "---\ntype: doc\nsubtype: report\n---\n# 周报\n", encoding="utf-8"
+    )
+    assert check_doc_filename_subtype(tmp_path, "TEST") == []
+    assert check_doc_location_subtype(tmp_path, "TEST") == []
+
+
+# ========== P2-14:gen-index 单元测试 ==========
+
+def test_gen_index_basic(tmp_path, monkeypatch):
+    """P2-14:gen-index 扫描条目并按路由表顺序输出表格"""
+    import pm
+
+    # 构造最小项目结构(带 项目章程.md 让 find_project_dir 能识别)
+    (tmp_path / "项目管理").mkdir()
+    (tmp_path / "项目管理" / "项目章程.md").write_text(
+        "---\nschema_version: '3.0'\n---\n# 章程\n", encoding="utf-8"
+    )
+    # 几个条目(乱序,验证排序)
+    (tmp_path / "记忆").mkdir()
+    (tmp_path / "记忆" / "决策记录.md").write_text(
+        "---\ntype: dec_log\n---\n# 决策记录\n\n<!-- 在此追加条目 -->\n"
+        "---\nid: DEC-0002\ntype: dec\ntitle: 决策二\ndate: 2026-07-26\nstatus: 生效\nrelated: []\n---\n### DEC-0002\n\n---\n"
+        "---\nid: DEC-0001\ntype: dec\ntitle: 决策一\ndate: 2026-07-25\nstatus: 评估中\nrelated: []\n---\n### DEC-0001\n\n---\n",
+        encoding="utf-8"
+    )
+    (tmp_path / "项目管理" / "需求登记册.md").write_text(
+        "---\ntype: req_log\n---\n# 需求登记册\n\n<!-- 在此追加条目 -->\n"
+        "---\nid: REQ-0001\ntype: req\ntitle: 需求一\ndate: 2026-07-25\nstatus: 待评审\nrelated: [DEC-0001]\n---\n### REQ-0001\n\n---\n",
+        encoding="utf-8"
+    )
+
+    # monkeypatch 让 find_project_dir 返回 tmp_path
+    monkeypatch.setattr(pm, "find_project_dir", lambda: tmp_path)
+    rc = pm.cmd_gen_index([])
+    assert rc == 0
+
+    index_path = tmp_path / "INDEX.md"
+    assert index_path.exists()
+    content = index_path.read_text(encoding="utf-8")
+    # 应含 frontmatter
+    assert "derived: true" in content
+    assert "type: index" in content
+    # 应含全部 3 个条目
+    assert "REQ-0001" in content
+    assert "DEC-0001" in content
+    assert "DEC-0002" in content
+    # 排序:REQ 在 DEC 之前(路由表顺序),组内 id 升序(DEC-0001 < DEC-0002)
+    req_pos = content.index("REQ-0001")
+    dec1_pos = content.index("DEC-0001")
+    dec2_pos = content.index("DEC-0002")
+    assert req_pos < dec1_pos < dec2_pos
+    # related 应展开为逗号分隔
+    assert "DEC-0001" in content  # REQ-0001 的 related 已展开
+
+
+def test_gen_index_skips_session_and_derived(tmp_path, monkeypatch):
+    """P2-14:gen-index 跳过 session 类型 + 派生文件"""
+    import pm
+
+    (tmp_path / "项目管理").mkdir()
+    (tmp_path / "项目管理" / "项目章程.md").write_text(
+        "---\nschema_version: '3.0'\n---\n# 章程\n", encoding="utf-8"
+    )
+    # session 类型条目(应被跳过)
+    (tmp_path / "记忆").mkdir()
+    (tmp_path / "记忆" / "agent会话.md").write_text(
+        "---\ntype: session_log\n---\n# agent会话\n\n"
+        "---\nid: SESSION-2026-07-25-0001\ntype: session\ntitle: 测试会话\ndate: 2026-07-25\nstatus: 进行中\n---\n### SESSION\n",
+        encoding="utf-8"
+    )
+    # 真实条目
+    (tmp_path / "项目管理" / "需求登记册.md").write_text(
+        "---\ntype: req_log\n---\n# 需求登记册\n\n<!-- 在此追加条目 -->\n"
+        "---\nid: REQ-0001\ntype: req\ntitle: 需求一\ndate: 2026-07-25\nstatus: 待评审\nrelated: []\n---\n### REQ-0001\n",
+        encoding="utf-8"
+    )
+    # 派生文件(应被跳过)
+    (tmp_path / "现状.md").write_text(
+        "---\nderived: true\ntype: 现状\n---\n# 现状\n| REQ-9999 | 假条目 | 2026-01-01 | ? | |\n",
+        encoding="utf-8"
+    )
+
+    monkeypatch.setattr(pm, "find_project_dir", lambda: tmp_path)
+    rc = pm.cmd_gen_index([])
+    assert rc == 0
+    content = (tmp_path / "INDEX.md").read_text(encoding="utf-8")
+    # 应只含 REQ-0001,不含 SESSION-XXXX 也不含 REQ-9999
+    assert "REQ-0001" in content
+    assert "SESSION-" not in content
+    assert "REQ-9999" not in content
+
+
+def test_gen_index_empty_project(tmp_path, monkeypatch):
+    """P2-14:空项目生成 INDEX 含"暂无条目"占位"""
+    import pm
+    (tmp_path / "项目管理").mkdir()
+    (tmp_path / "项目管理" / "项目章程.md").write_text(
+        "---\nschema_version: '3.0'\n---\n# 章程\n", encoding="utf-8"
+    )
+    monkeypatch.setattr(pm, "find_project_dir", lambda: tmp_path)
+    rc = pm.cmd_gen_index([])
+    assert rc == 0
+    content = (tmp_path / "INDEX.md").read_text(encoding="utf-8")
+    assert "暂无条目" in content
+
+
+def test_gen_index_preserves_proj_id(tmp_path, monkeypatch):
+    """P2-14:已有 INDEX.md 时保留 proj_id,不强制覆盖"""
+    import pm
+    (tmp_path / "项目管理").mkdir()
+    (tmp_path / "项目管理" / "项目章程.md").write_text(
+        "---\nschema_version: '3.0'\n---\n# 章程\n", encoding="utf-8"
+    )
+    # 既有 INDEX.md,proj_id 已被 PM 改过
+    existing = (
+        "---\nderived: true\ntype: index\ntitle: 跨类全景索引\ndate: 2026-01-01\n"
+        "proj_id: PROJ-Custom-Name\n---\n\n# INDEX\n\n| 编号 | 标题 | 日期 | 状态 | 关联 |\n| --- | --- | --- | --- | --- |\n"
+    )
+    (tmp_path / "INDEX.md").write_text(existing, encoding="utf-8")
+
+    monkeypatch.setattr(pm, "find_project_dir", lambda: tmp_path)
+    rc = pm.cmd_gen_index([])
+    assert rc == 0
+    content = (tmp_path / "INDEX.md").read_text(encoding="utf-8")
+    # 既有 proj_id 应被保留,不被覆盖为 tmp_path.name
+    assert "PROJ-Custom-Name" in content
+
+
 # ========== 兼容直接运行(无 pytest) ==========
+
+class _FakeMonkeyPatch:
+    """无 pytest 时,模拟 monkeypatch fixture 的最小实现(setattr/undo)。"""
+    def __init__(self):
+        self._undo = []
+    def setattr(self, target, name, value):
+        # 支持 setattr(obj, name, value) 和 setattr(target_str, name, value) 两种形式
+        # 这里只实现前者(本测试文件用到的形式)
+        old = getattr(target, name)
+        self._undo.append((target, name, old))
+        setattr(target, name, value)
+    def undo(self):
+        for target, name, old in reversed(self._undo):
+            setattr(target, name, old)
+        self._undo.clear()
+
 
 if __name__ == "__main__":
     # 简单跑法:收集所有 test_ 函数,手动调用
@@ -680,18 +910,27 @@ if __name__ == "__main__":
     passed = 0
     failed = 0
     for name, fn in tests:
-        # 检查是否需要 tmp_path
         sig = inspect.signature(fn)
-        if "tmp_path" in sig.parameters:
-            # 跳过需要 tmp_path 的(无 pytest 时手动建临时目录)
+        needs_tmp = "tmp_path" in sig.parameters
+        needs_mp = "monkeypatch" in sig.parameters
+        if needs_tmp or needs_mp:
             import tempfile
             with tempfile.TemporaryDirectory() as td:
+                mp = _FakeMonkeyPatch()
+                kwargs = {}
+                if needs_tmp:
+                    kwargs["tmp_path"] = Path(td)
+                if needs_mp:
+                    kwargs["monkeypatch"] = mp
                 try:
-                    fn(tmp_path=Path(td))
+                    fn(**kwargs)
                     passed += 1
                 except Exception as e:
                     print(f"FAIL {name}: {e}")
                     failed += 1
+                finally:
+                    if needs_mp:
+                        mp.undo()
         else:
             try:
                 fn()

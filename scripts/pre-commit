@@ -1,5 +1,5 @@
 #!/bin/sh
-# PM-Playbook pre-commit hook
+# keel pre-commit hook
 # 调用 check.py 校验所有项目,失败则拒绝 commit
 # 安装: cp scripts/pre-commit .git/hooks/pre-commit && chmod +x .git/hooks/pre-commit
 #   或 Windows: copy scripts\pre-commit .git\hooks\pre-commit

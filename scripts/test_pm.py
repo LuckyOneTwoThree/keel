@@ -12,7 +12,7 @@ from pathlib import Path
 
 # 让 test 能 import pm 和 check
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from pm import replace_draft_flag, scan_max_id, DEFAULT_STATUS
+from pm import replace_draft_flag, scan_max_id, DEFAULT_STATUS, insert_entry_after_marker
 from check import ALLOWED_STATUS
 
 
@@ -179,6 +179,75 @@ def test_scan_max_id_draft_content_not_scanned(tmp_path):
     )
     # 应扫到 3(正文里 a.md 的 REQ-0003),不是 9999(草稿正文引用)
     assert scan_max_id(tmp_path, "REQ") == 3
+
+
+# ========== insert_entry_after_marker(P1-1 修复) ==========
+
+def test_insert_entry_with_marker():
+    """P1-1:有 <!-- 在此追加条目 注释时,在注释行之后插入"""
+    content = (
+        "---\n"
+        "type: req_log\n"
+        "---\n"
+        "# 需求登记册\n"
+        "\n"
+        "<!-- 在此追加条目 -->\n"
+        "\n"
+        "## 条目格式参考\n"
+    )
+    fm_text = "---\nid: REQ-0001\ndraft: true\n---"
+    body = "\n### REQ-0001 — 2026-07-25\n标题\n\n---\n"
+    new_content = insert_entry_after_marker(content, fm_text, body)
+    # 新条目应插在注释行之后,"## 条目格式参考" 之前
+    assert "在此追加条目 -->" in new_content
+    assert "REQ-0001" in new_content
+    # 注释在前,新条目在中,## 条目格式参考 在后
+    marker_pos = new_content.index("在此追加条目 -->")
+    entry_pos = new_content.index("REQ-0001")
+    section_pos = new_content.index("## 条目格式参考")
+    assert marker_pos < entry_pos < section_pos
+
+
+def test_insert_entry_fallback_first_entry():
+    """P1-1:无 marker 时 fallback 到第一个真实条目 FM 之前"""
+    content = (
+        "---\n"
+        "type: req_log\n"
+        "---\n"
+        "# 需求登记册\n"
+        "\n"
+        "---\n"
+        "id: REQ-0003\n"
+        "type: req\n"
+        "---\n"
+        "### REQ-0003 — 2026-07-20\n"
+        "已有条目\n"
+    )
+    fm_text = "---\nid: REQ-0004\ndraft: true\n---"
+    body = "\n### REQ-0004 — 2026-07-25\n新条目\n\n---\n"
+    new_content = insert_entry_after_marker(content, fm_text, body)
+    # 新条目 REQ-0004 应在 REQ-0003 之前(最新在顶)
+    req4_pos = new_content.index("id: REQ-0004")
+    req3_pos = new_content.index("id: REQ-0003")
+    assert req4_pos < req3_pos
+
+
+def test_insert_entry_fallback_empty_file():
+    """P1-1:无 marker 无现有条目时,追加到文件末尾"""
+    content = (
+        "---\n"
+        "type: req_log\n"
+        "---\n"
+        "# 需求登记册\n"
+    )
+    fm_text = "---\nid: REQ-0001\ndraft: true\n---"
+    body = "\n### REQ-0001 — 2026-07-25\n标题\n\n---\n"
+    new_content = insert_entry_after_marker(content, fm_text, body)
+    assert "REQ-0001" in new_content
+    # 文件头 FM 应保持在前
+    header_pos = new_content.index("type: req_log")
+    entry_pos = new_content.index("id: REQ-0001")
+    assert header_pos < entry_pos
 
 
 # ========== DEFAULT_STATUS(P1-C 修复) ==========

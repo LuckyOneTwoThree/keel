@@ -2,6 +2,7 @@
 type: session_log
 title: agent 会话
 date: 2026-07-25
+proj_id: PROJ-XXX
 derived: false
 ---
 

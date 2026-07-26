@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-PM-Playbook v3.0 CLI 门面
+keel v3.0 CLI 门面
 用法: python scripts/pm.py <命令> [参数]
 
 命令:
@@ -13,6 +13,8 @@ PM-Playbook v3.0 CLI 门面
   brief              重聚简报(三级回退锚点:SESSION→git log→mtime)
   doctor [--fix]      自检环境(Python/git/hook/schema),--fix 自动安装 pre-commit hook
   finalize <id>      draft:true → false,跑全量校验
+  accept <REQ-XXXX>  需求验收:登记册 status → 已验收 + 建验收草稿
+  gen-index          扫所有条目重建 INDEX.md(派生文件,可重建)
 
 设计哲学(D4): pm.py 只放"生成便利",校验真理全部独占在 check.py。
 agent 退化到裸写时,仍被 check.py 收敛到同一不变式——分叉只在"便利",不在"正确"。
@@ -200,7 +202,12 @@ def scan_max_id(project_dir, prefix):
     return max_num
 
 def extract_entries_from_file(fpath):
-    """从单文件提取所有条目(含 frontmatter)"""
+    """从单文件提取所有条目(含 frontmatter)。
+
+    P2-12 修法:复用 check.py 的 extract_frontmatter_blocks,
+    修复旧 split 方式漏扫紧凑格式条目的 bug(详见该函数注释)。
+    """
+    from check import extract_frontmatter_blocks
     entries = []
     try:
         with open(fpath, encoding="utf-8") as fp:
@@ -209,19 +216,33 @@ def extract_entries_from_file(fpath):
         return entries
     # 去掉代码块(避免代码块里的 frontmatter 被误解析为真条目)
     content = re.sub(r"```[a-zA-Z]*\n.*?\n```", "", content, flags=re.DOTALL)
-    # 按 --- 分块
-    blocks = re.split(r"\n---\s*\n", content)
-    for block in blocks:
-        block = block.strip()
-        if not block.startswith("---"):
-            continue
-        block_full = "---\n" + block[3:].lstrip() + "\n---\n"
-        fm = parse_frontmatter_simple(block_full)
+    for fm, _body in extract_frontmatter_blocks(content):
         if "id" in fm:
             entries.append(fm)
     return entries
 
 # ============ 命令实现 ============
+
+def insert_entry_after_marker(content, fm_text, body):
+    """把新条目(fm + body)插入到多条目文件的合适位置。
+    优先级递减:
+      ① 找 "<!-- 在此追加条目" 注释,在注释行之后插入
+      ② fallback:找第一个真实条目 FM(\\n---\\nid: 模式,区别于文件头 FM),在它之前插入
+      ③ 最后 fallback:追加到文件末尾
+    """
+    marker = "<!-- 在此追加条目"
+    if marker in content:
+        marker_idx = content.index(marker)
+        line_end = content.index("\n", marker_idx)
+        insert_pos = line_end + 1
+        return content[:insert_pos] + "\n" + fm_text + body + content[insert_pos:]
+    # fallback:找文件中第一个真实条目 FM(\n---\nid: 模式)
+    m = re.search(r"\n---\s*\nid:", content)
+    if m:
+        insert_pos = m.start()
+        return content[:insert_pos] + "\n" + fm_text + body + content[insert_pos:]
+    # 最后 fallback:追加到文件末尾
+    return content + "\n" + fm_text + body
 
 def cmd_init(args):
     """pm init <项目名>  从 _模板/ 克隆新项目 + 补 proj_id + 自检"""
@@ -284,9 +305,11 @@ def cmd_init(args):
                 continue
             fm = parts[1]
             new_fm = fm
-            # 补 proj_id(若未带)
+            # 补 proj_id(若未带)或替换 PROJ-XXX 占位符(P2-5/6:模板统一带占位)
             # P3-D:插到 date 之后(与模板字段顺序一致),旧实现插到 FM 最前
-            if "proj_id:" not in fm:
+            m_proj = re.search(r"^proj_id:\s*(.+)$", new_fm, re.MULTILINE)
+            if not m_proj:
+                # 缺失,插入到 date 之后
                 date_match = re.search(r"^date:\s*.*$", new_fm, re.MULTILINE)
                 if date_match:
                     insert_at = date_match.end()
@@ -295,6 +318,18 @@ def cmd_init(args):
                     # 无 date 字段,追加到 FM 末尾
                     new_fm = new_fm.rstrip() + f"\nproj_id: {proj_name}\n"
                 proj_id_count += 1
+            else:
+                # 已有 proj_id 字段,检查是否是 PROJ-XXX 占位符
+                current_proj = m_proj.group(1).strip()
+                if current_proj in ("PROJ-XXX", "PROJ-XXX-Placeholder"):
+                    # 占位符,替换为实际项目名
+                    new_fm = re.sub(
+                        r"^(proj_id:\s*).*$",
+                        rf"\g<1>{proj_name}",
+                        new_fm,
+                        flags=re.MULTILINE,
+                    )
+                    proj_id_count += 1
             # 章程文件:更新 updated / date / current_milestone 为当天
             # (date 字段对所有类型都必填,但模板日期是占位,实例化时刷成当天)
             if fpath == charter_path:
@@ -416,17 +451,41 @@ def cmd_new(args):
 
     # 决定写入位置
     if entry_type == "req":
-        # PRD 独立文件,先写草稿区
+        # req 特殊处理:同时写两份
+        # ① .draft/draft-req-XXXX-prd.md(PRD 草稿,doc 文件)
+        # ② 项目管理/需求登记册.md(REQ 条目,真相源)
+        # 两份都标 draft:true,pm finalize <REQ-ID> 时同时翻 draft
         draft_dir = project_dir / ".draft"
         draft_dir.mkdir(exist_ok=True)
         draft_file = draft_dir / f"draft-req-{new_num:04d}-prd.md"
-        body = f"\n### {new_id} — {today}\n{title}\n\n(待补全正文)\n"
+        prd_body = f"\n### {new_id} — {today}\n{title}\n\n(待补全正文)\n"
         with open(draft_file, "w", encoding="utf-8") as fp:
-            fp.write(fm_text + body)
-        print(f"✅ 已创建草稿: {draft_file}")
+            fp.write(fm_text + prd_body)
+        print(f"✅ 已创建 PRD 草稿: {draft_file}")
         print(f"   编号: {new_id}")
         print(f"   状态: draft:true (PM 定稿时跑 pm finalize {new_id})")
-        print(f"   下一步: 编辑草稿正文 → pm finalize {new_id} → pm commit")
+
+        # ② 同步在需求登记册追加 REQ 条目(P1-1 修法)
+        # 需求登记册条目正文与 PRD 不同(登记册只存条目级索引,详情在 PRD)
+        registry_path = project_dir / "项目管理" / "需求登记册.md"
+        if registry_path.exists():
+            # 登记册条目正文:指向 PRD,不重复内容(单一真相源)
+            registry_body = (
+                f"\n### {new_id} — {today}\n"
+                f"{title}\n\n"
+                f"详见 [REQ-{new_num:04d}-PRD](../文档库/01-需求/REQ-{new_num:04d}-PRD.md)。\n\n---\n"
+            )
+            with open(registry_path, encoding="utf-8") as fp:
+                reg_content = fp.read()
+            new_reg_content = insert_entry_after_marker(reg_content, fm_text, registry_body)
+            with open(registry_path, "w", encoding="utf-8") as fp:
+                fp.write(new_reg_content)
+            print(f"✅ 已在登记册追加条目: {registry_path}")
+        else:
+            print(f"⚠️  需求登记册不存在,跳过条目写入: {registry_path}")
+            print(f"   PM 需手动在登记册追加 {new_id} 条目")
+
+        print(f"   下一步: 编辑 PRD 草稿 → pm finalize {new_id} → pm commit")
     else:
         # 多条目文件,prepend 到顶部(最新在顶)
         rel_path = TYPE_FILE[entry_type]
@@ -437,37 +496,7 @@ def cmd_new(args):
         with open(target_file, encoding="utf-8") as fp:
             content = fp.read()
         body = f"\n### {new_id} — {today}\n{title}\n\n(待补全正文)\n\n---\n"
-        # P1-B 修复:插入位置定位
-        # 旧实现 re.search(r"\n---\s*\n", content) 匹配到文件头 frontmatter 结束符,
-        # 新条目被插在文件头 FM 和 # 标题 之间,标题被推到新条目下方,人读结构破坏。
-        #
-        # 新策略(优先级递减):
-        # ① 找 "<!-- 在此追加条目" 注释(模板里都有),在注释行之后插入
-        # ② fallback:找第一个真实条目 FM(\n---\nid: 模式,区别于文件头 FM),
-        #    在它之前插入(成为新的第一个条目)
-        # ③ 最后 fallback:追加到文件末尾
-        marker = "<!-- 在此追加条目"
-        inserted = False
-        if marker in content:
-            marker_idx = content.index(marker)
-            # 找注释所在行的结束位置
-            line_end = content.index("\n", marker_idx)
-            # 在该行之后插入(下一行开头)
-            insert_pos = line_end + 1
-            new_content = content[:insert_pos] + "\n" + fm_text + body + content[insert_pos:]
-            inserted = True
-        if not inserted:
-            # fallback:找文件中第一个真实条目 FM(\n---\nid: 模式)
-            # 文件头 FM 后紧跟 # 标题,条目 FM 后紧跟 id:——靠 id: 区分
-            m = re.search(r"\n---\s*\nid:", content)
-            if m:
-                # m.start() 是 \n 的位置,在 \n 之前插入新条目(新条目 body 末尾带 ---\n 作分隔符)
-                insert_pos = m.start()
-                new_content = content[:insert_pos] + "\n" + fm_text + body + content[insert_pos:]
-                inserted = True
-        if not inserted:
-            # 最后 fallback:追加到文件末尾
-            new_content = content + "\n" + fm_text + body
+        new_content = insert_entry_after_marker(content, fm_text, body)
         with open(target_file, "w", encoding="utf-8") as fp:
             fp.write(new_content)
         print(f"✅ 已添加: {new_id} → {target_file}")
@@ -553,7 +582,11 @@ def cmd_commit(args):
     return rc
 
 def cmd_brief(args):
-    """pm brief  重聚简报(三级回退锚点)"""
+    """pm brief [--all]  重聚简报(三级回退锚点)
+
+    --all: 显示全量开放 RSK(默认只报 level=高)
+    """
+    show_all = "--all" in args
     project_dir = get_project_arg()
     if not project_dir:
         print("错误: 未找到项目目录")
@@ -561,6 +594,8 @@ def cmd_brief(args):
 
     print(f"📋 重聚简报 — {project_dir.name}")
     print(f"   生成时间: {datetime.now().strftime('%Y-%m-%d %H:%M')}")
+    if show_all:
+        print(f"   模式: --all(显示全量开放 RSK)")
     print()
 
     # 三级回退找锚点
@@ -610,10 +645,13 @@ def cmd_brief(args):
         print(f"🕐 上次锚点: 无(首次会话)")
     print()
 
-    # 扫真相源,聚合到期项
-    print("📅 到期/警示项:")
+    # 扫真相源,聚合到期项(P2-10:全量 RSK 分组)
     today = date.today()
-    found_alerts = False
+    rsk_high = []     # level=高 + status=开放
+    rsk_mid_low = []  # level=中/低 + status=开放(--all 才显示)
+    dep_alerts = []   # DEP T-3/已逾期
+    review_alerts = []  # DEC/RSK 复审到期
+    draft_aging = []  # 超期草稿(>7天警告/>14天阻断)
 
     # 扫所有条目
     for root, dirs, files in os.walk(project_dir):
@@ -625,12 +663,19 @@ def cmd_brief(args):
             fpath = os.path.join(root, f)
             entries = extract_entries_from_file(fpath)
             for fm in entries:
-                # 高风险开放(只报 level=高,中/低不进 brief)
-                if fm.get("type") == "rsk" and fm.get("status") == "开放" and fm.get("level") == "高":
+                # 跳过 session 类型(P1-4 一致)
+                if fm.get("type") == "session":
+                    continue
+                # RSK 开放项
+                if fm.get("type") == "rsk" and fm.get("status") == "开放":
                     eid = fm.get("id", "?")
                     title = fm.get("title", "?")
-                    print(f"  🔴 [高风险开放] {eid}: {title}")
-                    found_alerts = True
+                    level = fm.get("level", "?")
+                    entry = (eid, title, level)
+                    if level == "高":
+                        rsk_high.append(entry)
+                    else:
+                        rsk_mid_low.append(entry)
                 # 外部阻塞
                 if fm.get("type") == "dep" and fm.get("status") == "等待中":
                     eid = fm.get("id", "?")
@@ -640,12 +685,8 @@ def cmd_brief(args):
                         try:
                             ed_date = datetime.strptime(ed, "%Y-%m-%d").date()
                             days_left = (ed_date - today).days
-                            if days_left <= 3:
-                                print(f"  🟡 [DEP T-{days_left}天] {eid}: {title} (期望 {ed})")
-                                found_alerts = True
-                            elif days_left < 0:
-                                print(f"  🔴 [DEP 已逾期 {-days_left}天] {eid}: {title} (期望 {ed})")
-                                found_alerts = True
+                            if days_left <= 3 or days_left < 0:
+                                dep_alerts.append((eid, title, ed, days_left))
                         except:
                             pass
                 # 复审到期
@@ -658,10 +699,47 @@ def cmd_brief(args):
                             if days_left <= 0:
                                 eid = fm.get("id", "?")
                                 title = fm.get("title", "?")
-                                print(f"  🟡 [复审到期 {-days_left}天] {eid}: {title}")
-                                found_alerts = True
+                                review_alerts.append((eid, title, days_left))
                         except:
                             pass
+                # draft 老化(P2-10:brief 也扫条目级 draft,不只 .draft/ 草稿区)
+                if fm.get("draft") == "true":
+                    d = fm.get("date", "")
+                    if d:
+                        try:
+                            entry_date = datetime.strptime(str(d), "%Y-%m-%d").date()
+                            age = (today - entry_date).days
+                            if age > 7:
+                                eid = fm.get("id", "?")
+                                draft_aging.append((eid, age))
+                        except:
+                            pass
+
+    print("📅 到期/警示项:")
+    found_alerts = False
+    # 高风险开放
+    for eid, title, level in rsk_high:
+        print(f"  🔴 [高风险开放] {eid}: {title}")
+        found_alerts = True
+    # 中低风险开放(--all 才显示)
+    if show_all:
+        for eid, title, level in rsk_mid_low:
+            icon = "🟠" if level == "中" else "🟡"
+            print(f"  {icon} [{level}风险开放] {eid}: {title}")
+            found_alerts = True
+    elif rsk_mid_low:
+        print(f"  ℹ️  另有 {len(rsk_mid_low)} 条中/低开放 RSK(--all 查看)")
+    # 外部阻塞
+    for eid, title, ed, days_left in dep_alerts:
+        if days_left < 0:
+            print(f"  🔴 [DEP 已逾期 {-days_left}天] {eid}: {title} (期望 {ed})")
+        else:
+            print(f"  🟡 [DEP T-{days_left}天] {eid}: {title} (期望 {ed})")
+        found_alerts = True
+    # 复审到期
+    for eid, title, days_left in review_alerts:
+        print(f"  🟡 [复审到期 {-days_left}天] {eid}: {title}")
+        found_alerts = True
     if not found_alerts:
         print("  (无到期项)")
     print()
@@ -673,8 +751,33 @@ def cmd_brief(args):
         if drafts:
             print(f"📝 草稿区({len(drafts)} 个未完成):")
             for d in drafts:
-                print(f"  - {d.name}")
+                # 计算草稿龄(从文件名提取日期 draft-XXX-YYYY-MM-DD-XXX.md,或用 mtime)
+                age_str = ""
+                m_date = re.search(r"(\d{4}-\d{2}-\d{2})", d.name)
+                if m_date:
+                    try:
+                        d_date = datetime.strptime(m_date.group(1), "%Y-%m-%d").date()
+                        age = (today - d_date).days
+                        if age > 14:
+                            age_str = f" ⛔ {age}天(超期阻断)"
+                        elif age > 7:
+                            age_str = f" ⚠️  {age}天(超期警告)"
+                        else:
+                            age_str = f" ({age}天)"
+                    except:
+                        pass
+                print(f"  - {d.name}{age_str}")
             print()
+
+    # 条目级 draft 老化(P2-10:不仅扫 .draft/,也扫条目级 draft:true)
+    if draft_aging:
+        print(f"⏰ 超期条目草稿({len(draft_aging)} 个 draft:true 超 7 天):")
+        for eid, age in draft_aging:
+            if age > 14:
+                print(f"  ⛔ {eid}: {age}天(超期阻断,需 finalize 或砍)")
+            else:
+                print(f"  ⚠️  {eid}: {age}天(超期警告)")
+        print()
 
     print("💡 下一步: 检查到期项 → 处理草稿 → pm check → pm commit")
     return 0
@@ -682,7 +785,7 @@ def cmd_brief(args):
 def cmd_doctor(args):
     """pm doctor [--fix]  自检环境,--fix 自动安装 pre-commit hook"""
     fix_mode = "--fix" in args
-    print("🔧 PM-Playbook 环境自检")
+    print("🔧 keel 环境自检")
     print()
 
     issues = []
@@ -770,6 +873,259 @@ def cmd_doctor(args):
         print("✅ 环境就绪")
         return 0
 
+def cmd_accept(args):
+    """pm accept <REQ-XXXX>  需求验收:登记册 status → 已验收 + 建验收草稿
+
+    步骤:
+    ① 在 需求登记册.md 把该 REQ 条目的 status 改为 已验收
+    ② 在 .draft/draft-req-XXXX-验收.md 建验收报告草稿(若已存在跳过)
+    ③ 跑全量校验
+    """
+    if not args:
+        print("用法: pm accept <REQ-XXXX>  例: pm accept REQ-0007")
+        return 1
+    target_id = args[0].strip().upper()
+    if not target_id.startswith("REQ-"):
+        print(f"错误: {target_id} 不是 REQ- 编号(只支持需求验收)")
+        return 1
+    project_dir = get_project_arg()
+    if not project_dir:
+        print("错误: 未找到项目目录")
+        return 1
+
+    # ① 在登记册翻 status
+    registry_path = project_dir / "项目管理" / "需求登记册.md"
+    if not registry_path.exists():
+        print(f"错误: 需求登记册不存在: {registry_path}")
+        return 1
+    with open(registry_path, encoding="utf-8") as fp:
+        content = fp.read()
+    if target_id not in content:
+        print(f"错误: {target_id} 不在需求登记册")
+        return 1
+    # 按块定位:把 target_id 所在 FM 的 status 改为 已验收
+    # 复用 replace_draft_flag 的块定位思路,但改 status
+    lines = content.split("\n")
+    id_line_idx = None
+    for i, line in enumerate(lines):
+        s = line.strip()
+        if s == f"id: {target_id}" or s == f"id:{target_id}":
+            id_line_idx = i
+            break
+    if id_line_idx is None:
+        print(f"错误: 找不到 {target_id} 的 id 行")
+        return 1
+    # 向前找 ---
+    block_start = None
+    for i in range(id_line_idx, -1, -1):
+        if lines[i].strip() == "---":
+            block_start = i
+            break
+    if block_start is None:
+        print(f"错误: 找不到 {target_id} 的 frontmatter 开始 ---")
+        return 1
+    # 向后找 ---
+    block_end = None
+    for i in range(id_line_idx + 1, len(lines)):
+        if lines[i].strip() == "---":
+            block_end = i
+            break
+    if block_end is None:
+        print(f"错误: 找不到 {target_id} 的 frontmatter 结束 ---")
+        return 1
+    # 在 block 范围内替换 status 行
+    status_replaced = False
+    for i in range(block_start, block_end + 1):
+        m = re.match(r"^(\s*status:\s*)(.+)$", lines[i])
+        if m:
+            lines[i] = f"{m.group(1)}已验收"
+            status_replaced = True
+            break
+    if not status_replaced:
+        print(f"错误: {target_id} 缺 status 字段")
+        return 1
+    with open(registry_path, "w", encoding="utf-8") as fp:
+        fp.write("\n".join(lines))
+    print(f"✅ 登记册 {target_id} status → 已验收")
+
+    # ② 建验收报告草稿(若不存在)
+    m_num = re.match(r"REQ-(\d{4})", target_id)
+    if m_num:
+        num = m_num.group(1)
+        draft_dir = project_dir / ".draft"
+        draft_dir.mkdir(exist_ok=True)
+        draft_file = draft_dir / f"draft-req-{num}-验收.md"
+        if draft_file.exists():
+            print(f"ℹ️  验收草稿已存在,跳过创建: {draft_file}")
+        else:
+            today = date.today().isoformat()
+            # 从登记册读 PRD 路径
+            prd_path = f"01-需求/REQ-{num}-PRD.md"
+            accept_fm = (
+                "---\n"
+                f"type: doc\n"
+                f"subtype: acceptance\n"
+                f"title: {target_id} 验收报告\n"
+                f"date: {today}\n"
+                f"ref: {target_id}\n"
+                f"related: []\n"
+                f"related_external: []\n"
+                f"draft: true\n"
+                "---\n"
+            )
+            accept_body = (
+                f"\n# {target_id} — 验收\n\n"
+                f"> 对照 PRD §5 验收标准 逐项检查。\n\n"
+                f"## 1. 验收范围\n"
+                f"详见 [REQ-{num}-PRD](../文档库/{prd_path})。\n\n"
+                f"## 2. 验收标准(引 PRD §5)\n"
+                f"## 3. 验收结果(通过 / 部分通过 / 不通过)\n"
+                f"## 4. 遗留问题(关联 RSK-)\n"
+                f"## 5. 验收结论\n"
+            )
+            with open(draft_file, "w", encoding="utf-8") as fp:
+                fp.write(accept_fm + accept_body)
+            print(f"✅ 已建验收草稿: {draft_file}")
+            print(f"   定稿时: pm finalize {target_id} (注:验收 doc 与 REQ 条目在不同文件,需手动翻 doc 的 draft)")
+
+    # ③ 跑校验
+    print("\n🔍 全量校验中...")
+    rc, out, _ = run([sys.executable, CHECK_PY, str(project_dir)])
+    print(out)
+    if rc == 1:
+        print("⚠️  校验失败,请修复后 pm commit")
+    return rc
+
+def cmd_gen_index(args):
+    """pm gen-index  扫描项目所有条目,生成 INDEX.md(跨类全景索引)
+
+    行为:
+    ① 扫所有非 .draft/ 非 归档/ 的 .md,提取条目(过滤 derived/_模板/session)
+    ② 按 AGENTS 路由表顺序(REQ → DEC → PRG → RSK → DEP → COM → KB → GKB)分组
+    ③ 组内按 id 升序(与既有 INDEX.md 一致)
+    ④ 写到 项目根/INDEX.md,frontmatter derived:true + 当天 date
+    ⑤ 若 INDEX.md 已存在,只重建表格区,保留既有 frontmatter 的 proj_id(若已写)
+    """
+    project_dir = get_project_arg()
+    if not project_dir:
+        print("错误: 未找到项目目录")
+        return 1
+
+    # 扫所有条目
+    all_entries = []
+    for root, dirs, files in os.walk(project_dir):
+        if ".draft" in Path(root).parts or "归档" in Path(root).parts:
+            continue
+        for f in files:
+            if not f.endswith(".md"):
+                continue
+            fpath = os.path.join(root, f)
+            # 跳过 INDEX.md 自身(避免把旧索引里的"示例行"误扫成条目)
+            if os.path.basename(fpath) == "INDEX.md":
+                continue
+            # 跳过派生文件(现状/路线图 等——它们 FM 里没 id,自然会被 extract 过滤,
+            # 但提前跳避免误把示例编号扫进去)
+            if is_derived_file(fpath):
+                continue
+            fms = extract_entries_from_file(fpath)
+            for fm in fms:
+                # 过滤 session 类型(与 cmd_brief 一致)
+                if fm.get("type") == "session":
+                    continue
+                if "id" not in fm:
+                    continue
+                all_entries.append(fm)
+
+    # 按 AGENTS 路由表顺序分组
+    # 顺序:REQ → DEC → PRG → RSK → DEP → COM → KB → GKB
+    TYPE_ORDER = ["req", "dec", "prg", "rsk", "dep", "com", "kb", "gkb"]
+    type_order_map = {t: i for i, t in enumerate(TYPE_ORDER)}
+
+    def sort_key(fm):
+        prefix = fm.get("type", "zzz")
+        # 未知类型排到最后
+        type_idx = type_order_map.get(prefix, 99)
+        # id 升序(用编号数字)
+        eid = fm.get("id", "")
+        m = re.match(r"^[A-Z]+-(\d{4})$", eid)
+        id_num = int(m.group(1)) if m else 0
+        return (type_idx, id_num)
+
+    all_entries.sort(key=sort_key)
+
+    # 构建表格行
+    rows = []
+    for fm in all_entries:
+        eid = fm.get("id", "?")
+        title = fm.get("title", "?")
+        # 标题里若含 |,转义避免破坏表格
+        if isinstance(title, str) and "|" in title:
+            title = title.replace("|", "\\|")
+        d = fm.get("date", "?")
+        # date 可能是 date 对象或字符串
+        d_str = str(d) if d else "?"
+        status = fm.get("status", "?")
+        # related 可能是 list 或字符串
+        related = fm.get("related", [])
+        if isinstance(related, list):
+            related_str = ", ".join(str(r) for r in related) if related else ""
+        else:
+            related_str = str(related) if related else ""
+        rows.append(f"| {eid} | {title} | {d_str} | {status} | {related_str} |")
+
+    # 读既有 INDEX.md 取 proj_id(若存在)
+    index_path = project_dir / "INDEX.md"
+    proj_id = None
+    if index_path.exists():
+        try:
+            with open(index_path, encoding="utf-8") as fp:
+                old = fp.read()
+            m = re.search(r"^proj_id:\s*(.+)$", old, re.MULTILINE)
+            if m:
+                proj_id = m.group(1).strip()
+        except:
+            pass
+    if not proj_id:
+        proj_id = project_dir.name
+
+    today = date.today().isoformat()
+    fm_text = (
+        "---\n"
+        "derived: true\n"
+        "type: index\n"
+        "title: 跨类全景索引\n"
+        f"date: {today}\n"
+        f"proj_id: {proj_id}\n"
+        "---\n"
+    )
+    body = (
+        "\n# INDEX(轻量·按需)\n\n"
+        "> 本文件**不是需手工维护的常驻文件**。\n"
+        "> - 日常检索优先用 grep + 需求登记册。\n"
+        "> - 仅当需要跨类全景视图时,由脚本/AI 按需生成。\n"
+        "> - 生成物标 `derived: true`,**可重建·非真相源**。\n\n"
+        "| 编号 | 标题 | 日期 | 状态 | 关联 |\n"
+        "| --- | --- | --- | --- | --- |\n"
+    )
+    if rows:
+        body += "\n".join(rows) + "\n"
+    else:
+        body += "| (暂无条目) | — | — | — | — |\n"
+
+    with open(index_path, "w", encoding="utf-8") as fp:
+        fp.write(fm_text + body)
+    print(f"✅ 已生成 INDEX: {index_path}")
+    print(f"   条目数: {len(rows)}")
+    # 分组统计
+    type_counts = {}
+    for fm in all_entries:
+        t = fm.get("type", "?")
+        type_counts[t] = type_counts.get(t, 0) + 1
+    if type_counts:
+        summary = ", ".join(f"{t.upper()}: {n}" for t, n in type_counts.items())
+        print(f"   分布: {summary}")
+    return 0
+
 def cmd_finalize(args):
     """pm finalize <id>  draft:true → false,跑全量校验"""
     if not args:
@@ -781,8 +1137,9 @@ def cmd_finalize(args):
         print("错误: 未找到项目目录")
         return 1
 
-    # 找条目所在文件
-    found = False
+    # 扫所有文件,翻所有含 target_id 且 draft:true 的条目
+    # (P1-1:REQ 类型同时有 PRD 草稿 + 登记册条目两份 draft,需同时翻)
+    found_files = []
     for root, dirs, files in os.walk(project_dir):
         # 归档里的条目不应再定稿(归档=已完成)
         if "归档" in Path(root).parts:
@@ -822,22 +1179,17 @@ def cmd_finalize(args):
                     with open(target_path, "w", encoding="utf-8") as fp:
                         fp.write(new_content)
                     os.remove(fpath)
-                    print(f"✅ 已定稿: {target_id}")
-                    print(f"   草稿 → {target_path}")
-                    print(f"   draft: true → false")
-                    found = True
-                    break
+                    print(f"✅ 已定稿(草稿→正式位): {target_path}")
+                    found_files.append(target_path)
             else:
                 with open(fpath, "w", encoding="utf-8") as fp:
                     fp.write(new_content)
-                print(f"✅ 已定稿: {target_id}")
-                print(f"   文件: {fpath}")
-                print(f"   draft: true → false")
-                found = True
-                break
-    if not found:
+                print(f"✅ 已定稿(就地翻 draft): {fpath}")
+                found_files.append(fpath)
+    if not found_files:
         print(f"❌ 未找到 {target_id} 或它不是 draft:true")
         return 1
+    print(f"   翻动文件数: {len(found_files)}(REQ 等多条目场景同时翻 PRD+登记册)")
 
     # 定稿后跑校验
     print("\n🔍 全量校验中...")
@@ -877,6 +1229,10 @@ def main():
         return cmd_doctor(args)
     elif cmd == "finalize":
         return cmd_finalize(args)
+    elif cmd == "accept":
+        return cmd_accept(args)
+    elif cmd == "gen-index":
+        return cmd_gen_index(args)
     elif cmd in ("-h", "--help", "help"):
         print(__doc__)
         return 0

@@ -1,4 +1,4 @@
-# PM 工作区
+# keel — PM 工作区
 
 > v3.0 · PM 中心化 + agent 可托管 · pull-based 上线。
 >
@@ -31,7 +31,7 @@
 
 ```bash
 # 1. 克隆本框架(或 fork 后 clone 自己的)
-git clone <repo-url> pm-playbook && cd pm-playbook
+git clone <repo-url> keel && cd keel
 
 # 2. 自检环境 + 自动装 pre-commit hook(只需一次)
 python scripts/pm.py doctor --fix
@@ -42,23 +42,23 @@ python scripts/pm.py init PROJ-我的项目
 # 4. 进入项目目录干活
 cd 项目/PROJ-我的项目
 
-# 5. 创建第一条需求(自动起 PRD 草稿)
+# 5. 创建第一条需求(同时起 PRD 草稿 + 在登记册追加 REQ 条目)
 python scripts/pm.py new-req "用户登录双因子认证"
-# → 草稿落到 .draft/draft-req-0001-prd.md,draft:true
+# → PRD 草稿落到 .draft/draft-req-0001-prd.md
+# → 需求登记册自动追加 REQ-0001 条目(都标 draft:true)
 
-# 6. 编辑 PRD 草稿正文,然后定稿(草稿→正式位 + 全量校验)
+# 6. 编辑 PRD 草稿正文,然后定稿(同时翻 PRD + 登记册条目 draft → false + 全量校验)
 python scripts/pm.py finalize REQ-0001
-# → 落到 文档库/01-需求/REQ-0001-PRD.md
+# → PRD 落到 文档库/01-需求/REQ-0001-PRD.md
+# → 登记册 REQ-0001 条目 draft:true → false
 
-# 7. 同时在 项目管理/需求登记册.md 手动追加 REQ-0001 条目(PRD 是 doc,登记册才是 REQ 真相源)
-
-# 8. 校验整个项目
+# 7. 校验整个项目
 python scripts/pm.py check
 
-# 9. 看重聚简报(下次回到项目时跑)
+# 8. 看重聚简报(下次回到项目时跑)
 python scripts/pm.py brief
 
-# 10. commit(校验 + git commit + Approved-by trailer)
+# 9. commit(校验 + git commit + Approved-by trailer)
 python scripts/pm.py commit "[REQ-0001] 新增需求"
 ```
 

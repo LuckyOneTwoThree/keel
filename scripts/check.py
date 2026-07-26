@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-PM-Playbook v3.0 校验脚本
+keel v3.0 校验脚本
 用法: python scripts/check.py [项目目录]
 不传参数则校验所有项目。
 
@@ -176,6 +176,38 @@ def parse_frontmatter(content):
         i += 1
     return fm, body
 
+def extract_frontmatter_blocks(content):
+    """从内容中提取所有 frontmatter 块(--- 包围)。
+    返回 list of (fm_dict, body_text)。
+
+    P2-12 修法:改用正则直接匹配 `---\\n...\\n---` 块,而非 `\\n---\\s*\\n` split。
+    旧 split 方式会消费掉条目 FM 的开头 `---`,导致紧凑格式(无空行分隔)的条目被漏扫。
+
+    正则关键点:用 lookahead `(?=\\S[^\\n]*:)` 断言 FM 开头 `---\\n` 后必须紧跟
+    `key: value` 行。这能区分:
+      - 真实文件格式(分隔符 + 空行 + FM 开头:`---\\n\\n---\\nid:`):
+        分隔符 `---\\n` 后是空行,lookahead 不匹配,跳过;FM 开头 `---\\n` 后是
+        `id:`,lookahead 匹配,✅
+      - pm new 生成格式 / 紧凑格式(分隔符 + FM 开头无空行:`---\\n---\\nid:`):
+        分隔符 `---\\n` 后是 `---`(不含 `:`),lookahead 不匹配,跳过;
+        FM 开头 `---\\n` 后是 `id:`,lookahead 匹配,✅
+      - 文件头 FM(`---\\ntype: dec_log`):lookahead 匹配 `type:`,✅
+      - 正文中的 `---` 分隔符(`---\\n\\n正文`):后是空行/正文,lookahead 不匹配,跳过 ✅
+
+    调用前应先去代码块(避免代码块内的 frontmatter 被误解析)。
+    """
+    blocks = []
+    fm_pattern = re.compile(
+        r"(?:^|\n)[ \t]*---[ \t]*\n(?=\S[^\n]*:)(.*?)\n[ \t]*---[ \t]*(?=\n|$)",
+        re.DOTALL
+    )
+    for m in fm_pattern.finditer(content):
+        fm_text = m.group(1)
+        fm, body = parse_frontmatter("---\n" + fm_text + "\n---\n")
+        if fm:
+            blocks.append((fm, body))
+    return blocks
+
 def find_entries(project_dir):
     """扫描项目目录,找出所有带 frontmatter 的条目。
     返回 list of dict: {file, fm, body, entry_id, entry_type}"""
@@ -204,16 +236,17 @@ def find_entries(project_dir):
         # 去掉代码块(避免代码块里的 frontmatter 被误解析为真条目)
         content = re.sub(r"```[a-zA-Z]*\n.*?\n```", "", content, flags=re.DOTALL)
         # 一个文件可能含多个条目(v3.0 多条目文件)
-        # 简化:用 --- 分块,每个含 id: 的块算一个条目
-        blocks = re.split(r"\n---\s*\n", content)
-        for block in blocks:
-            block = block.strip()
-            if not block.startswith("---"):
-                continue
-            # 重新加上开头 ---
-            block_with_open = "---" + block if not block.startswith("---\n") else block
-            fm, body = parse_frontmatter(block_with_open + "\n---\n")
-            if fm and "id" in fm and "type" in fm:
+        # P2-12:用 extract_frontmatter_blocks 替代旧的 split 方式,
+        # 修复紧凑格式条目被漏扫的 bug(详见 extract_frontmatter_blocks 注释)
+        for fm, body in extract_frontmatter_blocks(content):
+            if "id" in fm and "type" in fm:
+                # SESSION 类型显式跳过(P1-4):
+                # SESSION 是短时记忆,不参与条目校验(不作真相源,设计方案 v3.0 §2.5)。
+                # 之前 ALLOWED_STATUS/TYPE_PREFIX 都不含 session,但 find_entries
+                # 会扫到它——check_unique_ids 误校验其编号,其他检查 silently skip,
+                # 处于"半校验"灰区。显式排除,语义更清晰。
+                if fm.get("type") == "session":
+                    continue
                 entries.append({
                     "file": fpath,
                     "fm": fm,
@@ -762,6 +795,26 @@ def check_doc_ref_filename_consistency(project_dir, project_name):
             )
     return warnings
 
+def check_doc_report_filename(project_dir, project_name):
+    """P2-9:校验 report 子类型 doc 文件名格式。仅警告。
+
+    写入协议 §11 要求 report 文件名 = `YYYY-MM-DD-周报.md` / `YYYY-MM-DD-阶段报告.md`。
+    防止 PM 写成 `周报.md` / `weekly.md` 等不规整命名。
+    """
+    warnings = []
+    valid_pattern = re.compile(r"^\d{4}-\d{2}-\d{2}-(周报|阶段报告)\.md$")
+    for fpath, fm in _scan_doc_files(project_dir):
+        if fm.get("subtype") != "report":
+            continue
+        fname = os.path.basename(fpath)
+        if not valid_pattern.match(fname):
+            warnings.append(
+                f"[{project_name}] report 文件名格式不规范: {fpath}\n"
+                f"  当前文件名: '{fname}'\n"
+                f"  期望格式: YYYY-MM-DD-周报.md 或 YYYY-MM-DD-阶段报告.md"
+            )
+    return warnings
+
 # ========== 主入口 ==========
 
 def check_project(project_dir, project_name=None):
@@ -807,6 +860,8 @@ def check_project(project_dir, project_name=None):
     warnings += check_doc_filename_subtype(Path(project_dir), project_name)
     warnings += check_doc_location_subtype(Path(project_dir), project_name)
     warnings += check_doc_ref_filename_consistency(Path(project_dir), project_name)
+    # P2-9:report 子类型文件名格式校验
+    warnings += check_doc_report_filename(Path(project_dir), project_name)
 
     return errors, warnings
 

@@ -2,7 +2,7 @@
 derived: true
 type: index
 title: 跨类全景索引
-date: 2026-07-25
+date: 2026-07-26
 proj_id: PROJ-Node-PoC
 ---
 
@@ -26,3 +26,4 @@ proj_id: PROJ-Node-PoC
 | RSK-0001 | 8 项财务业务参数未与财务对齐 | 2026-07-16 | 开放 | PRG-0002, DEC-0007 |
 | DEP-0001 | MallSettlement 合约扩展设计与审计排期 | 2026-07-16 | 等待中 | DEC-0007, PRG-0002 |
 | COM-0001 | 与 PM 确认商城 v2.0 14 项架构决策 | 2026-07-16 | 已对齐 | DEC-0007, PRG-0002 |
+| KB-0001 | v2.0 层级化代理商城架构踩坑 | 2026-07-16 | 已晋升→GKB-0001 | DEC-0007, PRG-0002 |
