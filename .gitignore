@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.Python
+build/
+dist/
+*.egg-info/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+*.swp
+
+# WorkBuddy local data
+.workbuddy/
+
+# Env / secrets
+.env
+.env.*
+*.local
