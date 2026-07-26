@@ -7,12 +7,19 @@ PM-Playbook v3.0 校验脚本
 
 校验规则(对应 v3.0 设计方案 §2.3):
   - 编号唯一(per-project 作用域): 硬阻断
-  - 编号连续(建议 max+1): 仅警告
+  - 编号连续(建议 max+1): 仅警告(已降级为静默,见 check_continuity 注释)
   - 悬空引用(draft:false 时): 硬阻断
   - 悬空引用(draft:true 时): 仅警告
-  - 状态枚举: 硬阻断
-  - frontmatter schema(必填字段): 硬阻断
+  - 状态枚举: 硬阻断(已作废/已推翻/已晋升 前缀豁免)
+  - frontmatter schema(必填字段 id/type/title/date/status): 硬阻断
+  - 类型特定必填字段: 硬阻断
+      RSK: level, review_due
+      DEC: review_due
+      DEP: expected_delivery
+  - RSK level 枚举(高/中/低): 硬阻断
   - 日期格式(ISO YYYY-MM-DD): 硬阻断
+  - 文件位置(RSK/DEP 必在 项目管理/ 下): 硬阻断
+  - doc 文件 subtype 枚举(prd/plan/research/review/acceptance/report): 硬阻断
   - 排序(同文件内最新在顶): 警告
   - draft 老化(D1): 超 7 天警告,超 14 天阻断
   - 跨项目引用(@PROJ 语法): 不校验(只校项目内)
@@ -72,11 +79,22 @@ REQUIRED_FIELDS = ["id", "type", "title", "date", "status"]
 
 # 类型特定必填字段
 TYPE_REQUIRED_FIELDS = {
-    "rsk": ["level"],  # 风险等级:高/中/低
+    "rsk": ["level", "review_due"],   # 风险等级 + 复审到期
+    "dec": ["review_due"],            # 决策复审到期
+    "dep": ["expected_delivery"],     # 依赖期望交付日
 }
 
 # RSK level 允许值
 ALLOWED_LEVEL = {"高", "中", "低"}
+
+# doc 文件子类型枚举(PRD/方案/调研/评审/验收/报告)
+DOC_SUBTYPE = {"prd", "plan", "research", "review", "acceptance", "report"}
+
+# 类型 → 应位于的子目录(用于文件位置校验,防 RSK/DEP 错放 记忆/)
+TYPE_FILE_LOCATION = {
+    "rsk": "项目管理",  # RSK 应在 项目管理/风险登记册.md
+    "dep": "项目管理",  # DEP 应在 项目管理/依赖登记册.md
+}
 
 # 派生文件标记(豁免悬空校验)
 DERIVED_MARKERS = ["derived: true", "type: 现状", "type: 路线图"]
@@ -411,6 +429,69 @@ def check_sorting(entries, project_name):
             )
     return warnings
 
+def check_file_location(entries, project_name, project_dir):
+    """RSK/DEP 必须在 项目管理/ 下(防错放 记忆/)。硬阻断。"""
+    errors = []
+    for e in entries:
+        t = e["entry_type"]
+        if t not in TYPE_FILE_LOCATION:
+            continue
+        required_dir = TYPE_FILE_LOCATION[t]
+        fpath = e["file"]
+        try:
+            rel = os.path.relpath(fpath, project_dir)
+        except ValueError:
+            continue
+        # 拆分路径组件,精确匹配(避免子串误判)
+        parts = Path(rel).parts
+        if required_dir not in parts:
+            errors.append(
+                f"[{project_name}] 文件位置错误: {e['entry_id']}\n"
+                f"  {t} 类型应在 {required_dir}/ 下,实际: {rel}\n"
+                f"  路由表:{required_dir}/风险登记册.md 或 {required_dir}/依赖登记册.md"
+            )
+    return errors
+
+def check_doc_files(project_dir, project_name):
+    """校验 doc 类型文件的 frontmatter。
+    doc 文件不参与唯一性校验(无 id),但校验 subtype 必填且枚举。硬阻断。"""
+    errors = []
+    md_files = []
+    for root, dirs, files in os.walk(project_dir):
+        if ".draft" in Path(root).parts:
+            continue
+        for f in files:
+            if f.endswith(".md") and f != "_模板.md":
+                md_files.append(os.path.join(root, f))
+    for fpath in md_files:
+        if is_derived_file(fpath):
+            continue
+        try:
+            with open(fpath, encoding="utf-8") as fp:
+                content = fp.read()
+        except Exception:
+            continue
+        # 去掉代码块(避免模板里的 frontmatter 示例被误解析)
+        content_clean = re.sub(r"```[a-zA-Z]*\n.*?\n```", "", content, flags=re.DOTALL)
+        if not content_clean.startswith("---"):
+            continue
+        fm, _ = parse_frontmatter(content_clean)
+        if not fm or fm.get("type") != "doc":
+            continue
+        subtype = fm.get("subtype", "")
+        if not subtype:
+            errors.append(
+                f"[{project_name}] doc 文件缺 subtype: {fpath}\n"
+                f"  允许: {DOC_SUBTYPE}"
+            )
+        elif subtype not in DOC_SUBTYPE:
+            errors.append(
+                f"[{project_name}] doc subtype 枚举非法: {fpath}\n"
+                f"  subtype: '{subtype}'\n"
+                f"  允许: {DOC_SUBTYPE}"
+            )
+    return errors
+
 # ========== 主入口 ==========
 
 def check_project(project_dir, project_name=None):
@@ -430,6 +511,8 @@ def check_project(project_dir, project_name=None):
     errors += check_type_fields(entries, project_name)
     errors += check_status_enum(entries, project_name)
     errors += check_date_format(entries, project_name)
+    errors += check_file_location(entries, project_name, project_dir)
+    errors += check_doc_files(project_dir, project_name)
     dangling_err, dangling_warn = check_dangling_refs(entries, project_name)
     errors += dangling_err
     warnings += dangling_warn

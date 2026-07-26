@@ -1,17 +1,19 @@
 ---
-id: REQ-0001
-type: req
+type: doc
+subtype: prd
 title: Node 产品总纲
 date: 2026-07-09
-status: 已验收
+ref: REQ-0001
 proj_id: PROJ-Node-PoC
 related: [DEC-0005]
 related_external: []
+draft: false
 ---
 
 # REQ-0001-PRD Node 产品总纲
 
 > 真相源 · PoC 精简版(仅作引用目标,正文从略)。
+> 条目级元信息见 [需求登记册](../../项目管理/需求登记册.md) REQ-0001。
 
 ## 1. 产品定位
 

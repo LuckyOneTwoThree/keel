@@ -15,6 +15,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from check import (
     parse_frontmatter, check_unique_ids, check_status_enum,
     check_dangling_refs, check_type_fields, find_entries,
+    check_file_location, check_doc_files, DOC_SUBTYPE,
 )
 
 
@@ -139,11 +140,11 @@ def test_dangling_ref_cross_project_skip():
 # ========== check_type_fields (RSK level) ==========
 
 def test_rsk_level_valid():
-    """RSK level 合法值通过"""
+    """RSK level 合法值 + review_due 齐全 通过"""
     entries = [
-        {"entry_type": "rsk", "fm": {"status": "开放", "level": "高"}, "entry_id": "RSK-0001", "file": "a"},
-        {"entry_type": "rsk", "fm": {"status": "开放", "level": "中"}, "entry_id": "RSK-0002", "file": "b"},
-        {"entry_type": "rsk", "fm": {"status": "开放", "level": "低"}, "entry_id": "RSK-0003", "file": "c"},
+        {"entry_type": "rsk", "fm": {"status": "开放", "level": "高", "review_due": "2026-08-25"}, "entry_id": "RSK-0001", "file": "a"},
+        {"entry_type": "rsk", "fm": {"status": "开放", "level": "中", "review_due": "2026-08-25"}, "entry_id": "RSK-0002", "file": "b"},
+        {"entry_type": "rsk", "fm": {"status": "开放", "level": "低", "review_due": "2026-08-25"}, "entry_id": "RSK-0003", "file": "c"},
     ]
     assert check_type_fields(entries, "TEST") == []
 
@@ -151,17 +152,27 @@ def test_rsk_level_valid():
 def test_rsk_level_missing():
     """RSK level 缺失报错"""
     entries = [
-        {"entry_type": "rsk", "fm": {"status": "开放"}, "entry_id": "RSK-0001", "file": "a"},
+        {"entry_type": "rsk", "fm": {"status": "开放", "review_due": "2026-08-25"}, "entry_id": "RSK-0001", "file": "a"},
     ]
     errs = check_type_fields(entries, "TEST")
     assert len(errs) == 1
     assert "level" in errs[0]
 
 
+def test_rsk_review_due_missing():
+    """RSK review_due 缺失报错(新增校验)"""
+    entries = [
+        {"entry_type": "rsk", "fm": {"status": "开放", "level": "高"}, "entry_id": "RSK-0001", "file": "a"},
+    ]
+    errs = check_type_fields(entries, "TEST")
+    assert len(errs) == 1
+    assert "review_due" in errs[0]
+
+
 def test_rsk_level_invalid():
     """RSK level 非法值报错"""
     entries = [
-        {"entry_type": "rsk", "fm": {"status": "开放", "level": "严重"}, "entry_id": "RSK-0001", "file": "a"},
+        {"entry_type": "rsk", "fm": {"status": "开放", "level": "严重", "review_due": "2026-08-25"}, "entry_id": "RSK-0001", "file": "a"},
     ]
     errs = check_type_fields(entries, "TEST")
     assert len(errs) == 1
@@ -169,11 +180,126 @@ def test_rsk_level_invalid():
 
 
 def test_rsk_archived_exempt():
-    """作废状态 RSK 豁免 level 校验"""
+    """作废状态 RSK 豁免 level/review_due 校验"""
     entries = [
         {"entry_type": "rsk", "fm": {"status": "已作废(PM拒绝)"}, "entry_id": "RSK-0001", "file": "a"},
     ]
     assert check_type_fields(entries, "TEST") == []
+
+
+def test_dec_review_due_required():
+    """DEC review_due 必填(新增校验)"""
+    entries = [
+        {"entry_type": "dec", "fm": {"status": "生效"}, "entry_id": "DEC-0001", "file": "a"},
+    ]
+    errs = check_type_fields(entries, "TEST")
+    assert len(errs) == 1
+    assert "review_due" in errs[0]
+
+
+def test_dep_expected_delivery_required():
+    """DEP expected_delivery 必填(新增校验)"""
+    entries = [
+        {"entry_type": "dep", "fm": {"status": "等待中"}, "entry_id": "DEP-0001", "file": "a"},
+    ]
+    errs = check_type_fields(entries, "TEST")
+    assert len(errs) == 1
+    assert "expected_delivery" in errs[0]
+
+
+# ========== check_file_location (新增) ==========
+
+def test_file_location_rsk_correct(tmp_path):
+    """RSK 在 项目管理/ 下通过"""
+    proj = tmp_path / "PROJ-X"
+    pm_dir = proj / "项目管理"
+    pm_dir.mkdir(parents=True)
+    fpath = pm_dir / "风险登记册.md"
+    fpath.write_text("---\nid: RSK-0001\ntype: rsk\n---\n", encoding="utf-8")
+    entries = [{"entry_id": "RSK-0001", "entry_type": "rsk", "file": str(fpath)}]
+    assert check_file_location(entries, "TEST", str(proj)) == []
+
+
+def test_file_location_rsk_wrong(tmp_path):
+    """RSK 错放在 记忆/ 下报错"""
+    proj = tmp_path / "PROJ-X"
+    mem_dir = proj / "记忆"
+    mem_dir.mkdir(parents=True)
+    fpath = mem_dir / "风险登记册.md"
+    fpath.write_text("---\nid: RSK-0001\ntype: rsk\n---\n", encoding="utf-8")
+    entries = [{"entry_id": "RSK-0001", "entry_type": "rsk", "file": str(fpath)}]
+    errs = check_file_location(entries, "TEST", str(proj))
+    assert len(errs) == 1
+    assert "RSK-0001" in errs[0]
+
+
+def test_file_location_dep_wrong(tmp_path):
+    """DEP 错放在 记忆/ 下报错"""
+    proj = tmp_path / "PROJ-X"
+    mem_dir = proj / "记忆"
+    mem_dir.mkdir(parents=True)
+    fpath = mem_dir / "依赖登记册.md"
+    fpath.write_text("---\nid: DEP-0001\ntype: dep\n---\n", encoding="utf-8")
+    entries = [{"entry_id": "DEP-0001", "entry_type": "dep", "file": str(fpath)}]
+    errs = check_file_location(entries, "TEST", str(proj))
+    assert len(errs) == 1
+    assert "DEP-0001" in errs[0]
+
+
+# ========== check_doc_files (新增) ==========
+
+def test_doc_files_valid_subtype(tmp_path):
+    """doc 文件 subtype 合法通过"""
+    f = tmp_path / "REQ-0001-PRD.md"
+    f.write_text(
+        "---\ntype: doc\nsubtype: prd\ntitle: 测试\ndate: 2026-07-25\n---\n# 标题\n",
+        encoding="utf-8"
+    )
+    assert check_doc_files(str(tmp_path), "TEST") == []
+
+
+def test_doc_files_missing_subtype(tmp_path):
+    """doc 文件缺 subtype 报错"""
+    f = tmp_path / "REQ-0001-PRD.md"
+    f.write_text(
+        "---\ntype: doc\ntitle: 测试\ndate: 2026-07-25\n---\n# 标题\n",
+        encoding="utf-8"
+    )
+    errs = check_doc_files(str(tmp_path), "TEST")
+    assert len(errs) == 1
+    assert "subtype" in errs[0]
+
+
+def test_doc_files_invalid_subtype(tmp_path):
+    """doc 文件 subtype 非法报错"""
+    f = tmp_path / "REQ-0001-PRD.md"
+    f.write_text(
+        "---\ntype: doc\nsubtype: unknown\ntitle: 测试\ndate: 2026-07-25\n---\n# 标题\n",
+        encoding="utf-8"
+    )
+    errs = check_doc_files(str(tmp_path), "TEST")
+    assert len(errs) == 1
+    assert "unknown" in errs[0]
+
+
+def test_doc_files_skips_derived(tmp_path):
+    """派生文件(derived:true)豁免 doc 校验"""
+    f = tmp_path / "周报.md"
+    f.write_text(
+        "---\nderived: true\ntype: doc\nsubtype: report\ntitle: 周报\n---\n# 标题\n",
+        encoding="utf-8"
+    )
+    assert check_doc_files(str(tmp_path), "TEST") == []
+
+
+def test_doc_files_skips_template(tmp_path):
+    """_模板.md 豁免 doc 校验"""
+    f = tmp_path / "_模板.md"
+    f.write_text(
+        "---\ntype: doc\nsubtype: prd\n---\n# 模板\n",
+        encoding="utf-8"
+    )
+    assert check_doc_files(str(tmp_path), "TEST") == []
 
 
 # ========== find_entries (集成) ==========

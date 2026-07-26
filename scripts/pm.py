@@ -224,33 +224,37 @@ def cmd_init(args):
     shutil.copytree(template_dir, target_dir)
     print(f"✅ 已克隆模板 → {target_dir}")
 
-    # 在派生文件 frontmatter 里补 proj_id(模板未带)
-    proj_id_files = [
-        target_dir / "现状.md",
-        target_dir / "项目管理" / "项目章程.md",
-        target_dir / "项目管理" / "路线图.md",
-    ]
-    for fpath in proj_id_files:
-        if not fpath.exists():
+    # 在所有项目级 .md frontmatter 里补 proj_id(模板未带)
+    # 遍历 target_dir 下所有 .md,跳过 _模板.md 和 .draft/
+    proj_id_count = 0
+    for root, dirs, files in os.walk(target_dir):
+        if ".draft" in Path(root).parts:
             continue
-        try:
-            with open(fpath, encoding="utf-8") as fp:
-                content = fp.read()
-        except:
-            continue
-        if not content.startswith("---"):
-            continue
-        parts = content.split("---", 2)
-        if len(parts) < 3:
-            continue
-        fm = parts[1]
-        if "proj_id:" in fm:
-            continue
-        # 在 fm 顶部插入 proj_id
-        new_fm = "\nproj_id: " + proj_name + fm
-        new_content = "---" + new_fm + "---" + parts[2]
-        with open(fpath, "w", encoding="utf-8") as fp:
-            fp.write(new_content)
+        for f in files:
+            if not f.endswith(".md") or f == "_模板.md":
+                continue
+            fpath = Path(root) / f
+            try:
+                with open(fpath, encoding="utf-8") as fp:
+                    content = fp.read()
+            except:
+                continue
+            if not content.startswith("---"):
+                continue
+            parts = content.split("---", 2)
+            if len(parts) < 3:
+                continue
+            fm = parts[1]
+            if "proj_id:" in fm:
+                continue
+            # 在 fm 顶部插入 proj_id
+            new_fm = "\nproj_id: " + proj_name + fm
+            new_content = "---" + new_fm + "---" + parts[2]
+            with open(fpath, "w", encoding="utf-8") as fp:
+                fp.write(new_content)
+            proj_id_count += 1
+    if proj_id_count:
+        print(f"✅ 已为 {proj_id_count} 个文件补 proj_id: {proj_name}")
 
     # 确保 .draft/ 存在
     (target_dir / ".draft").mkdir(exist_ok=True)
