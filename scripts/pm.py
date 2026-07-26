@@ -227,8 +227,9 @@ def insert_entry_after_marker(content, fm_text, body):
     """把新条目(fm + body)插入到多条目文件的合适位置。
     优先级递减:
       ① 找 "<!-- 在此追加条目" 注释,在注释行之后插入
-      ② fallback:找第一个真实条目 FM(\\n---\\nid: 模式,区别于文件头 FM),在它之前插入
-      ③ 最后 fallback:追加到文件末尾
+      ② fallback:用 extract_frontmatter_blocks 找第一个真实条目块(跳过文件头 FM),
+         在它之前插入。比裸正则 \n---\s*\nid: 更健壮,能处理紧凑格式/带注释的格式。
+      ③ 最后 fallback:追加到文件末尾(并打印警告,提示模板缺锚点)
     """
     marker = "<!-- 在此追加条目"
     if marker in content:
@@ -236,12 +237,31 @@ def insert_entry_after_marker(content, fm_text, body):
         line_end = content.index("\n", marker_idx)
         insert_pos = line_end + 1
         return content[:insert_pos] + "\n" + fm_text + body + content[insert_pos:]
-    # fallback:找文件中第一个真实条目 FM(\n---\nid: 模式)
-    m = re.search(r"\n---\s*\nid:", content)
-    if m:
-        insert_pos = m.start()
-        return content[:insert_pos] + "\n" + fm_text + body + content[insert_pos:]
+    # fallback:用 extract_frontmatter_blocks 找所有 FM 块
+    # 跳过第一个(文件头 FM),在第二个块(第一个真实条目)开始位置插入
+    from check import extract_frontmatter_blocks
+    content_clean = re.sub(r"```[a-zA-Z]*\n.*?\n```", "", content, flags=re.DOTALL)
+    blocks = list(extract_frontmatter_blocks(content_clean))
+    if len(blocks) >= 2:
+        # 第二个块是第一个真实条目,找它在原文中的位置
+        # extract_frontmatter_blocks 返回 (fm, body),需要用 fm 内容定位
+        # 用第一个条目的 id 字段定位(更精确)
+        second_fm = blocks[1][0]
+        if "id" in second_fm:
+            # 在原文中找该 id 行,向前找 --- 块开始
+            id_val = second_fm["id"]
+            id_pattern = re.compile(rf"^id:\s*{re.escape(id_val)}\s*$", re.MULTILINE)
+            m = id_pattern.search(content)
+            if m:
+                # 向前找 --- (块开始)
+                before = content[:m.start()]
+                block_start = before.rfind("\n---")
+                if block_start != -1:
+                    insert_pos = block_start + 1  # 跳过 \n
+                    return content[:insert_pos] + "\n" + fm_text + body + content[insert_pos:]
     # 最后 fallback:追加到文件末尾
+    print("⚠️  警告:模板缺 `<!-- 在此追加条目` 锚点,且无法定位条目块,已追加到文件末尾")
+    print("   建议在模板中补 `<!-- 在此追加条目(最新在顶) -->` 注释作为显式锚点")
     return content + "\n" + fm_text + body
 
 def cmd_init(args):

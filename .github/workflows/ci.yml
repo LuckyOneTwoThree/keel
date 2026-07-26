@@ -17,15 +17,21 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: 跑 check.py 全量校验
+      - name: 跑 check.py 全量校验(项目 + 全局知识库)
         run: python scripts/check.py
 
-      - name: 安装 pytest(可选)
-        run: pip install pytest
-        continue-on-error: true
+      - name: 校验 _模板/ 自身(克隆为临时项目再跑 check)
+        # P1 修法:_模板/ 是所有未来项目的母版,但 check.py main() 只扫 项目/ + _共享/知识库
+        # 模板层是唯一没有守卫的层。克隆 _模板/ 为临时项目后跑 check,模板自身必须能通过校验
+        run: |
+          mkdir -p /tmp/_template_check
+          cp -r _模板/* /tmp/_template_check/
+          python scripts/check.py /tmp/_template_check
+
+      - name: 安装测试依赖
+        # P1 修法:旧实现 continue-on-error: true 会让 pytest 装失败静默降级
+        # 改为显式安装,失败则 CI 红
+        run: pip install -r requirements-dev.txt
 
       - name: 跑单元测试
-        run: |
-          # 优先用 pytest,回退到直接跑
-          python -m pytest scripts/test_check.py scripts/test_pm.py -v 2>/dev/null || \
-          python scripts/test_check.py && python scripts/test_pm.py
+        run: python -m pytest scripts/test_check.py scripts/test_pm.py -v

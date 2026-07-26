@@ -257,13 +257,31 @@ def find_entries(project_dir):
     return entries
 
 def is_derived_file(fpath):
-    """检查是否是派生文件(豁免悬空校验)"""
+    """检查是否是派生文件(豁免悬空校验)。
+
+    P1 修法:旧实现只读前 500 字节做子串匹配 `derived: true`,
+    任何文件正文出现这 7 个字符(如讨论派生规则的文档)就会被整文件豁免。
+    改为解析 frontmatter 后判断字段值,精确命中。
+    """
     try:
         with open(fpath, encoding="utf-8") as fp:
-            content = fp.read(500)  # 只读头部
-        return any(m in content for m in DERIVED_MARKERS)
+            content = fp.read()
     except:
         return False
+    # 去掉代码块(避免代码块里的 frontmatter 示例被误解析)
+    content_clean = re.sub(r"```[a-zA-Z]*\n.*?\n```", "", content, flags=re.DOTALL)
+    if not content_clean.startswith("---"):
+        return False
+    fm, _ = parse_frontmatter(content_clean)
+    if not fm:
+        return False
+    # 精确判断 frontmatter 字段
+    if fm.get("derived") == "true":
+        return True
+    # 兼容历史标记(type: 现状 / type: 路线图 容器级派生)
+    if fm.get("type") in ("现状", "路线图", "index"):
+        return True
+    return False
 
 # ========== 校验 ==========
 
@@ -350,10 +368,25 @@ def check_required_fields(entries, project_name):
     return errors, warnings
 
 def check_date_format(entries, project_name):
-    """日期格式(ISO YYYY-MM-DD)。硬阻断。"""
+    """日期格式(ISO YYYY-MM-DD)。硬阻断。
+
+    P0 修法:除了 date 字段,还校验类型特定日期字段:
+      - RSK/DEC: review_due(复审到期)
+      - DEP: expected_delivery(期望交付日)
+    这些字段被 pm brief 读作到期提醒,格式错会被 try/except 静默跳过,
+    导致到期提醒无声失效——最阴的一类失效。
+    """
     errors = []
     date_re = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+    # 类型特定日期字段映射
+    TYPE_DATE_FIELDS = {
+        "rsk": ["review_due"],
+        "dec": ["review_due"],
+        "dep": ["expected_delivery"],
+    }
     for e in entries:
+        t = e["entry_type"]
+        # 基本 date 字段
         d = e["fm"].get("date", "")
         if d and not date_re.match(str(d)):
             errors.append(
@@ -361,6 +394,15 @@ def check_date_format(entries, project_name):
                 f"  date: '{d}' (应为 YYYY-MM-DD)\n"
                 f"  文件: {e['file']}"
             )
+        # 类型特定日期字段
+        for field in TYPE_DATE_FIELDS.get(t, []):
+            val = e["fm"].get(field, "")
+            if val and not date_re.match(str(val)):
+                errors.append(
+                    f"[{project_name}] 日期格式非法: {e['entry_id']}\n"
+                    f"  {field}: '{val}' (应为 YYYY-MM-DD)\n"
+                    f"  文件: {e['file']}"
+                )
     return errors
 
 def check_type_fields(entries, project_name):
@@ -411,6 +453,7 @@ def check_dangling_refs(entries, project_name):
   - draft: false 或无 draft → 硬阻断
   - related_external → 不校验
   - 跨项目引用(含 @)→ 不校验
+  - blocks(DEP 专用)→ 同 related 一样校验悬空
 """
     errors = []
     warnings = []
@@ -418,6 +461,7 @@ def check_dangling_refs(entries, project_name):
     all_ids = {e["entry_id"] for e in entries}
     for e in entries:
         is_draft = e["fm"].get("draft", "false") == "true"
+        # related 字段悬空校验
         related = e["fm"].get("related", [])
         if isinstance(related, str):
             related = [related]
@@ -429,6 +473,25 @@ def check_dangling_refs(entries, project_name):
                 msg = (
                     f"[{project_name}] 悬空引用: {e['entry_id']}\n"
                     f"  related: '{ref}' 不存在\n"
+                    f"  文件: {e['file']}"
+                )
+                if is_draft:
+                    warnings.append(msg + f"\n  (draft:true,仅警告)")
+                else:
+                    errors.append(msg)
+        # blocks 字段悬空校验(DEP 专用,语义=阻塞哪些条目)
+        # P0 修法:blocks 与 related 一样是项目内引用,必须校验悬空
+        # 否则 DEP-0001 blocks:[REQ-0003] 里 REQ-0003 被砍,阻塞链断裂而校验全绿
+        blocks = e["fm"].get("blocks", [])
+        if isinstance(blocks, str):
+            blocks = [blocks]
+        for ref in blocks:
+            if "@" in ref:
+                continue
+            if ref not in all_ids:
+                msg = (
+                    f"[{project_name}] 悬空引用: {e['entry_id']}\n"
+                    f"  blocks: '{ref}' 不存在\n"
                     f"  文件: {e['file']}"
                 )
                 if is_draft:
