@@ -11,8 +11,10 @@ PM-Playbook v3.0 校验脚本
   - 悬空引用(draft:false 时): 硬阻断
   - 悬空引用(draft:true 时): 仅警告
   - 状态枚举: 硬阻断(已作废/已推翻/已晋升 前缀豁免)
-  - frontmatter schema(必填字段 id/type/title/date/status): 硬阻断
-  - 类型特定必填字段: 硬阻断
+  - frontmatter schema:
+      id/type/title/date 必填: 硬阻断(基本标识,即使 draft 也强制)
+      status 必填: draft:false 硬阻断 / draft:true 警告(写入协议 §4)
+  - 类型特定必填字段: draft:false 硬阻断 / draft:true 警告
       RSK: level, review_due
       DEC: review_due
       DEP: expected_delivery
@@ -23,6 +25,9 @@ PM-Playbook v3.0 校验脚本
   - 排序(同文件内最新在顶): 警告
   - draft 老化(D1): 超 7 天警告,超 14 天阻断
   - 跨项目引用(@PROJ 语法): 不校验(只校项目内)
+  - doc ref 悬空(非 draft): 警告(软关联,允许先写 PRD 后立 REQ)
+  - req artifacts 路径不存在(非 draft): 警告
+  - 作废指向悬空(已作废(误)→XXX-XXXX 中 XXX-XXXX 不存在,非 draft): 警告
 
 退出码:
   0 = 全部通过(可有警告)
@@ -278,17 +283,35 @@ def check_status_enum(entries, project_name):
     return errors
 
 def check_required_fields(entries, project_name):
-    """必填字段。硬阻断。"""
+    """必填字段校验(对应写入协议 §4 draft 宽松)。
+    - id/type/title/date: 基本标识,即使 draft:true 也硬阻断(否则不知道是哪条)
+    - status: draft:true 时缺失降级为警告;draft:false 硬阻断
+    """
     errors = []
+    warnings = []
+    # 基本标识字段(即使 draft 也硬阻断)
+    HARD_REQUIRED = ["id", "type", "title", "date"]
     for e in entries:
-        for field in REQUIRED_FIELDS:
+        is_draft = e["fm"].get("draft", "false") == "true"
+        for field in HARD_REQUIRED:
             if field not in e["fm"] or not e["fm"][field]:
                 errors.append(
                     f"[{project_name}] 必填字段缺失: {e['entry_id']}\n"
                     f"  缺失字段: {field}\n"
                     f"  文件: {e['file']}"
                 )
-    return errors
+        # status: draft:true 时降级为警告(与写入协议 §4 一致)
+        if "status" not in e["fm"] or not e["fm"]["status"]:
+            msg = (
+                f"[{project_name}] 必填字段缺失: {e['entry_id']}\n"
+                f"  缺失字段: status\n"
+                f"  文件: {e['file']}"
+            )
+            if is_draft:
+                warnings.append(msg + f"\n  (draft:true,仅警告)")
+            else:
+                errors.append(msg)
+    return errors, warnings
 
 def check_date_format(entries, project_name):
     """日期格式(ISO YYYY-MM-DD)。硬阻断。"""
@@ -305,14 +328,18 @@ def check_date_format(entries, project_name):
     return errors
 
 def check_type_fields(entries, project_name):
-    """类型特定字段校验。硬阻断。
-    - RSK: level 必填,取值 高/中/低
+    """类型特定字段校验(对应写入协议 §4 draft 宽松)。
+    - draft:false → 硬阻断
+    - draft:true → 类型必填字段缺失降级为警告(与 check_dangling_refs 一致)
+    - RSK level 枚举:无论 draft 都硬阻断(格式问题,非缺失)
     - 作废状态豁免(与 check_status_enum 一致)
     """
     errors = []
+    warnings = []
     for e in entries:
         t = e["entry_type"]
         status = e["fm"].get("status", "")
+        is_draft = e["fm"].get("draft", "false") == "true"
         # 作废状态豁免
         if status.startswith("已作废"):
             continue
@@ -321,12 +348,16 @@ def check_type_fields(entries, project_name):
         for field in required:
             val = e["fm"].get(field, "")
             if not val:
-                errors.append(
+                msg = (
                     f"[{project_name}] 类型字段缺失: {e['entry_id']}\n"
                     f"  {t} 类型必填字段: {field}\n"
                     f"  文件: {e['file']}"
                 )
-        # RSK level 枚举校验
+                if is_draft:
+                    warnings.append(msg + f"\n  (draft:true,仅警告)")
+                else:
+                    errors.append(msg)
+        # RSK level 枚举校验(无论 draft 都校验,枚举非法是格式问题)
         if t == "rsk":
             level = e["fm"].get("level", "")
             if level and level not in ALLOWED_LEVEL:
@@ -336,7 +367,7 @@ def check_type_fields(entries, project_name):
                     f"  允许: {ALLOWED_LEVEL}\n"
                     f"  文件: {e['file']}"
                 )
-    return errors
+    return errors, warnings
 
 def check_dangling_refs(entries, project_name):
     """悬空引用校验。
@@ -464,8 +495,6 @@ def check_doc_files(project_dir, project_name):
             if f.endswith(".md") and f != "_模板.md":
                 md_files.append(os.path.join(root, f))
     for fpath in md_files:
-        if is_derived_file(fpath):
-            continue
         try:
             with open(fpath, encoding="utf-8") as fp:
                 content = fp.read()
@@ -476,6 +505,7 @@ def check_doc_files(project_dir, project_name):
         if not content_clean.startswith("---"):
             continue
         fm, _ = parse_frontmatter(content_clean)
+        # 只校验 type: doc 的文件(非 doc 文件如 INDEX/现状/章程 都跳过)
         if not fm or fm.get("type") != "doc":
             continue
         subtype = fm.get("subtype", "")
@@ -492,6 +522,123 @@ def check_doc_files(project_dir, project_name):
             )
     return errors
 
+def check_dangling_doc_refs(project_dir, project_name, all_ids):
+    """校验 doc 文件的 ref 字段是否指向存在的 REQ- 条目。仅警告。
+
+    doc 文件无 id,用 ref 关联 REQ-XXXX。ref 悬空通常是:
+    - PRD 写好了但 REQ 条目还没立(允许,因为是软关联)
+    - REQ 编号写错(应该警告)
+
+    draft:true 的 doc 文件降级为静默(草稿期允许前向引用)。
+    """
+    warnings = []
+    md_files = []
+    for root, dirs, files in os.walk(project_dir):
+        if ".draft" in Path(root).parts:
+            continue
+        for f in files:
+            if f.endswith(".md") and f != "_模板.md":
+                md_files.append(os.path.join(root, f))
+    for fpath in md_files:
+        try:
+            with open(fpath, encoding="utf-8") as fp:
+                content = fp.read()
+        except Exception:
+            continue
+        content_clean = re.sub(r"```[a-zA-Z]*\n.*?\n```", "", content, flags=re.DOTALL)
+        if not content_clean.startswith("---"):
+            continue
+        fm, _ = parse_frontmatter(content_clean)
+        if not fm or fm.get("type") != "doc":
+            continue
+        ref = fm.get("ref", "")
+        if not ref:
+            continue  # report 子类型无 ref 是合法的
+        # draft 的 doc 不校验 ref(草稿期允许前向引用)
+        if fm.get("draft", "false") == "true":
+            continue
+        # report 子类型无 ref 合法(周报不绑特定 REQ)
+        if fm.get("subtype") == "report":
+            continue
+        if ref not in all_ids:
+            warnings.append(
+                f"[{project_name}] doc ref 悬空: {fpath}\n"
+                f"  ref: '{ref}' 不存在\n"
+                f"  (doc 与 REQ 是软关联,允许先写 PRD 后立 REQ,但定稿后应补齐)"
+            )
+    return warnings
+
+def check_artifacts_path(entries, project_dir, project_name):
+    """校验 req 条目的 artifacts 路径是否存在。仅警告。
+
+    artifacts 是相对 文档库/ 的路径列表。
+    路径不存在通常是:
+    - PRD 还没建(REQ 立了但 PRD 未起)
+    - 路径写错(应该警告)
+
+    draft:true 的 req 降级为静默。
+    """
+    warnings = []
+    docs_dir = project_dir / "文档库"
+    for e in entries:
+        if e["entry_type"] != "req":
+            continue
+        if e["fm"].get("draft", "false") == "true":
+            continue
+        artifacts = e["fm"].get("artifacts", [])
+        if isinstance(artifacts, str):
+            artifacts = [artifacts]
+        if not artifacts:
+            continue
+        for art_path in artifacts:
+            if not art_path:
+                continue
+            # artifacts 路径相对 文档库/
+            full_path = docs_dir / art_path
+            if not full_path.exists():
+                warnings.append(
+                    f"[{project_name}] req artifacts 路径不存在: {e['entry_id']}\n"
+                    f"  artifacts: '{art_path}'\n"
+                    f"  期望位置: {full_path}\n"
+                    f"  文件: {e['file']}"
+                )
+    return warnings
+
+def check_archived_pointer(entries, project_name):
+    """校验"已作废(误)→XXX" 状态指向的编号是否存在。仅警告。
+
+    作废指向应是同项目内的有效编号。指向不存在通常是:
+    - 写错了指向编号
+    - 指向的条目还没建(前向引用)
+
+    draft:true 降级为静默。
+
+    例外:已晋升→GKB-XXXX 不校验(GKB 在 workspace 级 _共享/ 下,
+    项目内通常找不到,见写入协议 §12.4)。
+    """
+    warnings = []
+    all_ids = {e["entry_id"] for e in entries}
+    for e in entries:
+        status = e["fm"].get("status", "")
+        if e["fm"].get("draft", "false") == "true":
+            continue
+        # 匹配 "已作废(误)→XXX-XXXX" 或 "已推翻→XXX-XXXX" 或 "已晋升→GKB-XXXX"
+        m = re.search(r"→\s*([A-Z]+-\d{4})", status)
+        if not m:
+            continue
+        target = m.group(1)
+        # GKB 指向跳过(workspace 级,项目内不校验,见写入协议 §12.4)
+        if target.startswith("GKB-"):
+            continue
+        if target not in all_ids:
+            warnings.append(
+                f"[{project_name}] 作废指向悬空: {e['entry_id']}\n"
+                f"  status: '{status}'\n"
+                f"  指向的 {target} 不存在\n"
+                f"  文件: {e['file']}"
+            )
+    return warnings
+
 # ========== 主入口 ==========
 
 def check_project(project_dir, project_name=None):
@@ -507,8 +654,12 @@ def check_project(project_dir, project_name=None):
 
     # 硬阻断校验
     errors += check_unique_ids(entries, project_name)
-    errors += check_required_fields(entries, project_name)
-    errors += check_type_fields(entries, project_name)
+    req_err, req_warn = check_required_fields(entries, project_name)
+    errors += req_err
+    warnings += req_warn
+    type_err, type_warn = check_type_fields(entries, project_name)
+    errors += type_err
+    warnings += type_warn
     errors += check_status_enum(entries, project_name)
     errors += check_date_format(entries, project_name)
     errors += check_file_location(entries, project_name, project_dir)
@@ -523,6 +674,11 @@ def check_project(project_dir, project_name=None):
     # 警告级校验
     warnings += check_continuity(entries, project_name)
     warnings += check_sorting(entries, project_name)
+    # P3 新增:ref/artifacts/作废指向 悬空校验(警告级)
+    all_ids = {e["entry_id"] for e in entries}
+    warnings += check_dangling_doc_refs(Path(project_dir), project_name, all_ids)
+    warnings += check_artifacts_path(entries, Path(project_dir), project_name)
+    warnings += check_archived_pointer(entries, project_name)
 
     return errors, warnings
 

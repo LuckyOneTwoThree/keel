@@ -137,7 +137,7 @@ def test_dangling_ref_cross_project_skip():
     assert len(errs) == 0
 
 
-# ========== check_type_fields (RSK level) ==========
+# ========== check_type_fields (RSK level / draft 宽松) ==========
 
 def test_rsk_level_valid():
     """RSK level 合法值 + review_due 齐全 通过"""
@@ -146,35 +146,37 @@ def test_rsk_level_valid():
         {"entry_type": "rsk", "fm": {"status": "开放", "level": "中", "review_due": "2026-08-25"}, "entry_id": "RSK-0002", "file": "b"},
         {"entry_type": "rsk", "fm": {"status": "开放", "level": "低", "review_due": "2026-08-25"}, "entry_id": "RSK-0003", "file": "c"},
     ]
-    assert check_type_fields(entries, "TEST") == []
+    errs, warns = check_type_fields(entries, "TEST")
+    assert errs == [] and warns == []
 
 
 def test_rsk_level_missing():
-    """RSK level 缺失报错"""
+    """RSK level 缺失(draft:false)→ 硬阻断"""
     entries = [
-        {"entry_type": "rsk", "fm": {"status": "开放", "review_due": "2026-08-25"}, "entry_id": "RSK-0001", "file": "a"},
+        {"entry_type": "rsk", "fm": {"status": "开放", "review_due": "2026-08-25", "draft": "false"}, "entry_id": "RSK-0001", "file": "a"},
     ]
-    errs = check_type_fields(entries, "TEST")
+    errs, warns = check_type_fields(entries, "TEST")
     assert len(errs) == 1
+    assert len(warns) == 0
     assert "level" in errs[0]
 
 
 def test_rsk_review_due_missing():
-    """RSK review_due 缺失报错(新增校验)"""
+    """RSK review_due 缺失(draft:false)→ 硬阻断"""
     entries = [
-        {"entry_type": "rsk", "fm": {"status": "开放", "level": "高"}, "entry_id": "RSK-0001", "file": "a"},
+        {"entry_type": "rsk", "fm": {"status": "开放", "level": "高", "draft": "false"}, "entry_id": "RSK-0001", "file": "a"},
     ]
-    errs = check_type_fields(entries, "TEST")
+    errs, warns = check_type_fields(entries, "TEST")
     assert len(errs) == 1
     assert "review_due" in errs[0]
 
 
 def test_rsk_level_invalid():
-    """RSK level 非法值报错"""
+    """RSK level 非法值报错(无论 draft)"""
     entries = [
-        {"entry_type": "rsk", "fm": {"status": "开放", "level": "严重", "review_due": "2026-08-25"}, "entry_id": "RSK-0001", "file": "a"},
+        {"entry_type": "rsk", "fm": {"status": "开放", "level": "严重", "review_due": "2026-08-25", "draft": "true"}, "entry_id": "RSK-0001", "file": "a"},
     ]
-    errs = check_type_fields(entries, "TEST")
+    errs, warns = check_type_fields(entries, "TEST")
     assert len(errs) == 1
     assert "严重" in errs[0]
 
@@ -184,27 +186,76 @@ def test_rsk_archived_exempt():
     entries = [
         {"entry_type": "rsk", "fm": {"status": "已作废(PM拒绝)"}, "entry_id": "RSK-0001", "file": "a"},
     ]
-    assert check_type_fields(entries, "TEST") == []
+    errs, warns = check_type_fields(entries, "TEST")
+    assert errs == [] and warns == []
 
 
 def test_dec_review_due_required():
-    """DEC review_due 必填(新增校验)"""
+    """DEC review_due 缺失(draft:false)→ 硬阻断"""
     entries = [
-        {"entry_type": "dec", "fm": {"status": "生效"}, "entry_id": "DEC-0001", "file": "a"},
+        {"entry_type": "dec", "fm": {"status": "生效", "draft": "false"}, "entry_id": "DEC-0001", "file": "a"},
     ]
-    errs = check_type_fields(entries, "TEST")
+    errs, warns = check_type_fields(entries, "TEST")
     assert len(errs) == 1
     assert "review_due" in errs[0]
 
 
 def test_dep_expected_delivery_required():
-    """DEP expected_delivery 必填(新增校验)"""
+    """DEP expected_delivery 缺失(draft:false)→ 硬阻断"""
     entries = [
-        {"entry_type": "dep", "fm": {"status": "等待中"}, "entry_id": "DEP-0001", "file": "a"},
+        {"entry_type": "dep", "fm": {"status": "等待中", "draft": "false"}, "entry_id": "DEP-0001", "file": "a"},
     ]
-    errs = check_type_fields(entries, "TEST")
+    errs, warns = check_type_fields(entries, "TEST")
     assert len(errs) == 1
     assert "expected_delivery" in errs[0]
+
+
+def test_type_fields_draft_warn():
+    """draft:true 时类型必填字段缺失降级为警告(写入协议 §4)"""
+    entries = [
+        {"entry_type": "dep", "fm": {"status": "等待中", "draft": "true"}, "entry_id": "DEP-0001", "file": "a"},
+        {"entry_type": "dec", "fm": {"status": "评估中", "draft": "true"}, "entry_id": "DEC-0001", "file": "b"},
+        {"entry_type": "rsk", "fm": {"status": "开放", "draft": "true"}, "entry_id": "RSK-0001", "file": "c"},
+    ]
+    errs, warns = check_type_fields(entries, "TEST")
+    assert len(errs) == 0
+    # dep.expected_delivery(1) + dec.review_due(1) + rsk.level(1) + rsk.review_due(1) = 4
+    assert len(warns) == 4
+
+
+# ========== check_required_fields (draft 宽松) ==========
+
+def test_required_fields_hard_id():
+    """id/type/title/date 缺失即使 draft:true 也硬阻断"""
+    from check import check_required_fields
+    entries = [
+        {"entry_type": "req", "fm": {"draft": "true", "status": "待评审"}, "entry_id": "", "file": "a"},
+    ]
+    errs, warns = check_required_fields(entries, "TEST")
+    assert len(errs) >= 1  # id/type/title/date 缺失
+
+
+def test_required_fields_draft_status_warn():
+    """draft:true 时 status 缺失降级为警告"""
+    from check import check_required_fields
+    entries = [
+        {"entry_type": "req", "fm": {"draft": "true", "id": "REQ-0001", "type": "req", "title": "测试", "date": "2026-07-25"}, "entry_id": "REQ-0001", "file": "a"},
+    ]
+    errs, warns = check_required_fields(entries, "TEST")
+    assert len(errs) == 0
+    assert len(warns) == 1
+    assert "status" in warns[0]
+
+
+def test_required_fields_no_status_block():
+    """draft:false 时 status 缺失硬阻断"""
+    from check import check_required_fields
+    entries = [
+        {"entry_type": "req", "fm": {"draft": "false", "id": "REQ-0001", "type": "req", "title": "测试", "date": "2026-07-25"}, "entry_id": "REQ-0001", "file": "a"},
+    ]
+    errs, warns = check_required_fields(entries, "TEST")
+    assert len(errs) == 1
+    assert "status" in errs[0]
 
 
 # ========== check_file_location (新增) ==========
@@ -282,14 +333,26 @@ def test_doc_files_invalid_subtype(tmp_path):
     assert "unknown" in errs[0]
 
 
-def test_doc_files_skips_derived(tmp_path):
-    """派生文件(derived:true)豁免 doc 校验"""
-    f = tmp_path / "周报.md"
+def test_doc_files_skips_non_doc(tmp_path):
+    """非 doc 文件(如 INDEX,type: index)不被当 doc 校验"""
+    f = tmp_path / "INDEX.md"
     f.write_text(
-        "---\nderived: true\ntype: doc\nsubtype: report\ntitle: 周报\n---\n# 标题\n",
+        "---\nderived: true\ntype: index\ntitle: 索引\n---\n# INDEX\n",
         encoding="utf-8"
     )
     assert check_doc_files(str(tmp_path), "TEST") == []
+
+
+def test_doc_files_derived_doc_still_checked(tmp_path):
+    """doc 文件(即使误带 derived:true)仍被 subtype 校验(P1-3 修法)"""
+    f = tmp_path / "周报.md"
+    f.write_text(
+        "---\nderived: true\ntype: doc\nsubtype: bad_subtype\ntitle: 周报\n---\n# 标题\n",
+        encoding="utf-8"
+    )
+    errs = check_doc_files(str(tmp_path), "TEST")
+    assert len(errs) == 1
+    assert "bad_subtype" in errs[0]
 
 
 def test_doc_files_skips_template(tmp_path):
@@ -332,6 +395,150 @@ def test_find_entries_skips_code_block(tmp_path):
     )
     entries = find_entries(tmp_path)
     assert len(entries) == 0
+
+
+# ========== check_dangling_doc_refs (P3 新增) ==========
+
+def test_doc_ref_exists_pass(tmp_path):
+    """doc ref 指向存在的 REQ 通过"""
+    from check import check_dangling_doc_refs
+    f = tmp_path / "REQ-0001-PRD.md"
+    f.write_text(
+        "---\ntype: doc\nsubtype: prd\nref: REQ-0001\ndraft: false\n---\n# 标题\n",
+        encoding="utf-8"
+    )
+    warns = check_dangling_doc_refs(tmp_path, "TEST", {"REQ-0001"})
+    assert warns == []
+
+
+def test_doc_ref_dangling_warn(tmp_path):
+    """doc ref 指向不存在的 REQ 警告"""
+    from check import check_dangling_doc_refs
+    f = tmp_path / "REQ-0001-PRD.md"
+    f.write_text(
+        "---\ntype: doc\nsubtype: prd\nref: REQ-0099\ndraft: false\n---\n# 标题\n",
+        encoding="utf-8"
+    )
+    warns = check_dangling_doc_refs(tmp_path, "TEST", {"REQ-0001"})
+    assert len(warns) == 1
+    assert "REQ-0099" in warns[0]
+
+
+def test_doc_ref_draft_silent(tmp_path):
+    """draft:true 的 doc ref 悬空静默(草稿期允许前向引用)"""
+    from check import check_dangling_doc_refs
+    f = tmp_path / "REQ-0001-PRD.md"
+    f.write_text(
+        "---\ntype: doc\nsubtype: prd\nref: REQ-0099\ndraft: true\n---\n# 标题\n",
+        encoding="utf-8"
+    )
+    warns = check_dangling_doc_refs(tmp_path, "TEST", {"REQ-0001"})
+    assert warns == []
+
+
+def test_doc_ref_report_no_ref_ok(tmp_path):
+    """report 子类型无 ref 合法(周报不绑特定 REQ)"""
+    from check import check_dangling_doc_refs
+    f = tmp_path / "2026-07-25-周报.md"
+    f.write_text(
+        "---\ntype: doc\nsubtype: report\ndraft: false\n---\n# 周报\n",
+        encoding="utf-8"
+    )
+    warns = check_dangling_doc_refs(tmp_path, "TEST", {"REQ-0001"})
+    assert warns == []
+
+
+# ========== check_artifacts_path (P3 新增) ==========
+
+def test_artifacts_path_exists_pass(tmp_path):
+    """req artifacts 路径存在通过"""
+    from check import check_artifacts_path
+    docs = tmp_path / "文档库"
+    (docs / "01-需求").mkdir(parents=True)
+    (docs / "01-需求" / "REQ-0001-PRD.md").write_text("# PRD", encoding="utf-8")
+    entries = [
+        {"entry_type": "req", "fm": {"draft": "false", "artifacts": ["01-需求/REQ-0001-PRD.md"]},
+         "entry_id": "REQ-0001", "file": "a"},
+    ]
+    warns = check_artifacts_path(entries, tmp_path, "TEST")
+    assert warns == []
+
+
+def test_artifacts_path_missing_warn(tmp_path):
+    """req artifacts 路径不存在警告"""
+    from check import check_artifacts_path
+    entries = [
+        {"entry_type": "req", "fm": {"draft": "false", "artifacts": ["01-需求/REQ-0099-PRD.md"]},
+         "entry_id": "REQ-0001", "file": "a"},
+    ]
+    warns = check_artifacts_path(entries, tmp_path, "TEST")
+    assert len(warns) == 1
+    assert "REQ-0099-PRD.md" in warns[0]
+
+
+def test_artifacts_path_draft_silent(tmp_path):
+    """draft:true 的 req artifacts 路径不存在静默"""
+    from check import check_artifacts_path
+    entries = [
+        {"entry_type": "req", "fm": {"draft": "true", "artifacts": ["01-需求/REQ-0099-PRD.md"]},
+         "entry_id": "REQ-0001", "file": "a"},
+    ]
+    warns = check_artifacts_path(entries, tmp_path, "TEST")
+    assert warns == []
+
+
+# ========== check_archived_pointer (P3 新增) ==========
+
+def test_archived_pointer_exists_pass():
+    """作废指向存在的编号通过"""
+    from check import check_archived_pointer
+    entries = [
+        {"entry_id": "DEC-0001", "fm": {"status": "已作废(误)→DEC-0002", "draft": "false"}, "file": "a"},
+        {"entry_id": "DEC-0002", "fm": {"status": "生效", "draft": "false"}, "file": "b"},
+    ]
+    warns = check_archived_pointer(entries, "TEST")
+    assert warns == []
+
+
+def test_archived_pointer_dangling_warn():
+    """作废指向不存在的编号警告"""
+    from check import check_archived_pointer
+    entries = [
+        {"entry_id": "DEC-0001", "fm": {"status": "已作废(误)→DEC-0099", "draft": "false"}, "file": "a"},
+    ]
+    warns = check_archived_pointer(entries, "TEST")
+    assert len(warns) == 1
+    assert "DEC-0099" in warns[0]
+
+
+def test_archived_pointer_promoted_to_gkb_skip():
+    """已晋升→GKB-XXXX 跳过(GKB 在 workspace 级,项目内不校验,见写入协议 §12.4)"""
+    from check import check_archived_pointer
+    entries = [
+        {"entry_id": "KB-0001", "fm": {"status": "已晋升→GKB-0099", "draft": "false"}, "file": "a"},
+    ]
+    warns = check_archived_pointer(entries, "TEST")
+    assert warns == []
+
+
+def test_archived_pointer_draft_silent():
+    """draft:true 的作废指向悬空静默"""
+    from check import check_archived_pointer
+    entries = [
+        {"entry_id": "DEC-0001", "fm": {"status": "已作废(误)→DEC-0099", "draft": "true"}, "file": "a"},
+    ]
+    warns = check_archived_pointer(entries, "TEST")
+    assert warns == []
+
+
+def test_archived_pointer_no_arrow_skip():
+    """普通状态(无 →)不被校验"""
+    from check import check_archived_pointer
+    entries = [
+        {"entry_id": "DEC-0001", "fm": {"status": "生效", "draft": "false"}, "file": "a"},
+    ]
+    warns = check_archived_pointer(entries, "TEST")
+    assert warns == []
 
 
 # ========== 兼容直接运行(无 pytest) ==========

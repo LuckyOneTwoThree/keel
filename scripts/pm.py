@@ -225,8 +225,11 @@ def cmd_init(args):
     print(f"✅ 已克隆模板 → {target_dir}")
 
     # 在所有项目级 .md frontmatter 里补 proj_id(模板未带)
+    # 同时更新项目章程的 updated/date 为当天(模板日期 → 实例化日期)
     # 遍历 target_dir 下所有 .md,跳过 _模板.md 和 .draft/
     proj_id_count = 0
+    today_iso = date.today().isoformat()
+    charter_path = target_dir / "项目管理" / "项目章程.md"
     for root, dirs, files in os.walk(target_dir):
         if ".draft" in Path(root).parts:
             continue
@@ -245,16 +248,38 @@ def cmd_init(args):
             if len(parts) < 3:
                 continue
             fm = parts[1]
-            if "proj_id:" in fm:
-                continue
-            # 在 fm 顶部插入 proj_id
-            new_fm = "\nproj_id: " + proj_name + fm
+            new_fm = fm
+            # 补 proj_id(若未带)
+            if "proj_id:" not in fm:
+                new_fm = "\nproj_id: " + proj_name + new_fm
+                proj_id_count += 1
+            # 章程文件:更新 updated / date / current_milestone 为当天
+            # (date 字段对所有类型都必填,但模板日期是占位,实例化时刷成当天)
+            if fpath == charter_path:
+                # updated
+                if re.search(r"^updated:\s*", new_fm, flags=re.MULTILINE):
+                    new_fm = re.sub(
+                        r"^(updated:\s*).*$",
+                        rf"\g<1>{today_iso}",
+                        new_fm,
+                        flags=re.MULTILINE,
+                    )
+                else:
+                    new_fm = new_fm.rstrip() + f"\nupdated: {today_iso}\n"
+                # date(顶层必填,刷成当天)
+                new_fm = re.sub(
+                    r"^(date:\s*).*$",
+                    rf"\g<1>{today_iso}",
+                    new_fm,
+                    flags=re.MULTILINE,
+                )
             new_content = "---" + new_fm + "---" + parts[2]
             with open(fpath, "w", encoding="utf-8") as fp:
                 fp.write(new_content)
-            proj_id_count += 1
     if proj_id_count:
         print(f"✅ 已为 {proj_id_count} 个文件补 proj_id: {proj_name}")
+    if charter_path.exists():
+        print(f"✅ 已刷新项目章程 updated/date: {today_iso}")
 
     # 确保 .draft/ 存在
     (target_dir / ".draft").mkdir(exist_ok=True)
@@ -322,10 +347,18 @@ def cmd_new(args):
         "related_external: []",
         "draft: true",
     ]
+    if entry_type == "req":
+        # req 预填 scope + artifacts 路径(PM 友好,finalize 前可改)
+        fm_lines.append("scope: 在范围")
+        fm_lines.append(f"artifacts: [01-需求/REQ-{new_num:04d}-PRD.md]")
     if entry_type == "dec" or entry_type == "rsk":
         fm_lines.append("review_due: ")
     if entry_type == "rsk":
         fm_lines.append("level: 中")  # 默认中,PM 后续调整
+    if entry_type == "dep":
+        # dep 必填 expected_delivery,draft:true 时空值降级警告(check.py §4)
+        # PM finalize 前必须填有效日期
+        fm_lines.append("expected_delivery: ")
     fm_lines.append("---")
     fm_text = "\n".join(fm_lines)
 
@@ -519,8 +552,8 @@ def cmd_brief(args):
             fpath = os.path.join(root, f)
             entries = extract_entries_from_file(fpath)
             for fm in entries:
-                # 高风险开放
-                if fm.get("type") == "rsk" and fm.get("status") == "开放" and fm.get("level") in ("高", "P0"):
+                # 高风险开放(只报 level=高,中/低不进 brief)
+                if fm.get("type") == "rsk" and fm.get("status") == "开放" and fm.get("level") == "高":
                     eid = fm.get("id", "?")
                     title = fm.get("title", "?")
                     print(f"  🔴 [高风险开放] {eid}: {title}")

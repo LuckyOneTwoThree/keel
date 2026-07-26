@@ -19,3 +19,9 @@ Thumbs.db
 .env
 .env.*
 *.local
+
+# .draft/ 草稿区策略(设计方案 v3.0 §2.4)
+# 保留 .draft/ 目录本身和 README.md 作说明(已 git 跟踪)
+# 忽略实际草稿文件(防误 commit + 草稿不进 git 历史,PM 拒绝后直接删)
+# 例外:如需把草稿纳入 git 作审计,删掉下行即可
+.draft/draft-*.md

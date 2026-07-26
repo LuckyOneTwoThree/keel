@@ -27,6 +27,44 @@
 - `记忆/agent会话.md` 短时记忆(跨会话延续)
 - 条目 frontmatter schema(正文不重复字段,详见 [写入协议.md](_共享/写入协议.md))
 
+## 快速开始(5 分钟跑通)
+
+```bash
+# 1. 克隆本框架(或 fork 后 clone 自己的)
+git clone <repo-url> pm-playbook && cd pm-playbook
+
+# 2. 自检环境 + 自动装 pre-commit hook(只需一次)
+python scripts/pm.py doctor --fix
+
+# 3. 从模板创建你的第一个项目
+python scripts/pm.py init PROJ-我的项目
+
+# 4. 进入项目目录干活
+cd 项目/PROJ-我的项目
+
+# 5. 创建第一条需求(自动起 PRD 草稿)
+python scripts/pm.py new-req "用户登录双因子认证"
+# → 草稿落到 .draft/draft-req-0001-prd.md,draft:true
+
+# 6. 编辑 PRD 草稿正文,然后定稿(草稿→正式位 + 全量校验)
+python scripts/pm.py finalize REQ-0001
+# → 落到 文档库/01-需求/REQ-0001-PRD.md
+
+# 7. 同时在 项目管理/需求登记册.md 手动追加 REQ-0001 条目(PRD 是 doc,登记册才是 REQ 真相源)
+
+# 8. 校验整个项目
+python scripts/pm.py check
+
+# 9. 看重聚简报(下次回到项目时跑)
+python scripts/pm.py brief
+
+# 10. commit(校验 + git commit + Approved-by trailer)
+python scripts/pm.py commit "[REQ-0001] 新增需求"
+```
+
+> 真实使用时:PM 直写不经草稿区,直接在登记册/章程/路线图编辑,然后 `pm check && pm commit`。
+> `pm new-req`/`pm new <type>` 是 agent 起草路径,PM 也可用。
+
 ## 我要做 X,该去哪?
 | 我想… | 去… |
 | --- | --- |
