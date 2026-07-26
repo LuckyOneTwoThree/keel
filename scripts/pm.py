@@ -35,6 +35,19 @@ TYPE_PREFIX = {
     "kb": "KB", "rsk": "RSK", "dep": "DEP", "gkb": "GKB",
 }
 
+# 各类型默认 status(P1-C 修复:覆盖全部 8 种,与 check.py ALLOWED_STATUS 对齐)
+# 旧实现用三元表达式,com/kb/gkb 默认"进行中"——不在各自枚举里,导致 pm check 硬阻断
+DEFAULT_STATUS = {
+    "req": "待评审",
+    "prg": "进行中",
+    "dec": "评估中",
+    "com": "待跟进",
+    "kb": "本地",
+    "rsk": "开放",
+    "dep": "等待中",
+    "gkb": "生效",
+}
+
 # 各类型对应的记忆文件名(单文件多条目)
 # 注意:rsk/dep 在 项目管理/ 下(与 AGENTS.md 路由表一致),其余在 记忆/ 下
 TYPE_FILE = {
@@ -136,11 +149,18 @@ def replace_draft_flag(content, target_id):
     return content, False
 
 def scan_max_id(project_dir, prefix):
-    """扫项目所有 .md,找某前缀的最大编号"""
+    """扫项目所有 .md,找某前缀的最大编号。
+
+    P1-A 修复:额外扫 .draft/ 下的草稿**文件名**编号,
+    防连续 pm new-req 时第二次编号与第一次相同(draft-req-0001-prd.md 被静默覆盖)。
+
+    注意:.draft/ 下的**正文**仍不扫(草稿正文里的编号可能是引用,非自有编号)。
+    """
     max_num = 0
     pattern = re.compile(rf"\b{prefix}-(\d{{4}})\b")
     for root, dirs, files in os.walk(project_dir):
-        # 跳过 .draft/ (草稿区)
+        # .draft/ 内容跳过(草稿正文里的编号不算,防误扫引用)
+        # 但 .draft/ 文件名编号在下方单独扫(P1-A)
         # 归档/ 不跳过——归档条目的编号仍是真编号,防重用
         if ".draft" in Path(root).parts:
             continue
@@ -162,6 +182,21 @@ def scan_max_id(project_dir, prefix):
                         max_num = num
             except:
                 pass
+    # P1-A:扫 .draft/ 文件名编号(草稿文件名格式 draft-{prefix小写}-XXXX-*.md)
+    # 防连续 new-req 时编号重用导致草稿被 open(..., "w") 覆盖
+    # 注意:草稿文件名用小写前缀(draft-req-0001-prd.md),与条目编号(REQ-0001)大小写不同,
+    # 用 IGNORECASE 兼容两种写法
+    proj_path = Path(project_dir) if not isinstance(project_dir, Path) else project_dir
+    draft_dir = proj_path / ".draft"
+    if draft_dir.exists():
+        fname_pattern = re.compile(rf"{prefix}-(\d{{4}})", re.IGNORECASE)
+        for f in draft_dir.iterdir():
+            if not f.name.endswith(".md") or f.name == "README.md":
+                continue
+            for m in fname_pattern.finditer(f.name):
+                num = int(m.group(1))
+                if num > max_num:
+                    max_num = num
     return max_num
 
 def extract_entries_from_file(fpath):
@@ -250,8 +285,15 @@ def cmd_init(args):
             fm = parts[1]
             new_fm = fm
             # 补 proj_id(若未带)
+            # P3-D:插到 date 之后(与模板字段顺序一致),旧实现插到 FM 最前
             if "proj_id:" not in fm:
-                new_fm = "\nproj_id: " + proj_name + new_fm
+                date_match = re.search(r"^date:\s*.*$", new_fm, re.MULTILINE)
+                if date_match:
+                    insert_at = date_match.end()
+                    new_fm = new_fm[:insert_at] + "\nproj_id: " + proj_name + new_fm[insert_at:]
+                else:
+                    # 无 date 字段,追加到 FM 末尾
+                    new_fm = new_fm.rstrip() + f"\nproj_id: {proj_name}\n"
                 proj_id_count += 1
             # 章程文件:更新 updated / date / current_milestone 为当天
             # (date 字段对所有类型都必填,但模板日期是占位,实例化时刷成当天)
@@ -342,7 +384,7 @@ def cmd_new(args):
         f"type: {entry_type}",
         f"title: {title}",
         f"date: {today}",
-        f"status: 待评审" if entry_type == "req" else f"status: 评估中" if entry_type == "dec" else "status: 开放" if entry_type == "rsk" else "status: 等待中" if entry_type == "dep" else "status: 进行中",
+        f"status: {DEFAULT_STATUS[entry_type]}",  # P1-C:用 DEFAULT_STATUS 映射,覆盖全部 8 种
         "related: []",
         "related_external: []",
         "draft: true",
@@ -394,15 +436,37 @@ def cmd_new(args):
             return 1
         with open(target_file, encoding="utf-8") as fp:
             content = fp.read()
-        # 找第一个 --- 分隔符,在它之前插入新条目
         body = f"\n### {new_id} — {today}\n{title}\n\n(待补全正文)\n\n---\n"
-        # 找文件头(标题 + 引用块)之后插入
-        # 简化:在第一个 "---\n" 前插入
-        match = re.search(r"\n---\s*\n", content)
-        if match:
-            insert_pos = match.start() + 1
+        # P1-B 修复:插入位置定位
+        # 旧实现 re.search(r"\n---\s*\n", content) 匹配到文件头 frontmatter 结束符,
+        # 新条目被插在文件头 FM 和 # 标题 之间,标题被推到新条目下方,人读结构破坏。
+        #
+        # 新策略(优先级递减):
+        # ① 找 "<!-- 在此追加条目" 注释(模板里都有),在注释行之后插入
+        # ② fallback:找第一个真实条目 FM(\n---\nid: 模式,区别于文件头 FM),
+        #    在它之前插入(成为新的第一个条目)
+        # ③ 最后 fallback:追加到文件末尾
+        marker = "<!-- 在此追加条目"
+        inserted = False
+        if marker in content:
+            marker_idx = content.index(marker)
+            # 找注释所在行的结束位置
+            line_end = content.index("\n", marker_idx)
+            # 在该行之后插入(下一行开头)
+            insert_pos = line_end + 1
             new_content = content[:insert_pos] + "\n" + fm_text + body + content[insert_pos:]
-        else:
+            inserted = True
+        if not inserted:
+            # fallback:找文件中第一个真实条目 FM(\n---\nid: 模式)
+            # 文件头 FM 后紧跟 # 标题,条目 FM 后紧跟 id:——靠 id: 区分
+            m = re.search(r"\n---\s*\nid:", content)
+            if m:
+                # m.start() 是 \n 的位置,在 \n 之前插入新条目(新条目 body 末尾带 ---\n 作分隔符)
+                insert_pos = m.start()
+                new_content = content[:insert_pos] + "\n" + fm_text + body + content[insert_pos:]
+                inserted = True
+        if not inserted:
+            # 最后 fallback:追加到文件末尾
             new_content = content + "\n" + fm_text + body
         with open(target_file, "w", encoding="utf-8") as fp:
             fp.write(new_content)
@@ -463,7 +527,16 @@ def cmd_commit(args):
     # git add 当前项目变更(精准 add,不 add 全仓库——违反"一条条目=一个 commit"的根源修复)
     # 找项目相对仓库根的路径(git 需要 / 分隔符)
     project_rel = os.path.relpath(project_dir, WORKSPACE_ROOT).replace("\\", "/")
-    run(["git", "add", project_rel], cwd=WORKSPACE_ROOT)
+    add_paths = [project_rel]
+
+    # P2-A:检测 _共享/ 是否有改动(GKB 晋升等场景涉及 _共享/知识库/全局知识库.md + 项目内 KB-)
+    # 自动一并 add,避免 PM 手动敲 git add _共享/(违反"PM 永不敲裸 git"设计目标)
+    rc, shared_status, _ = run(["git", "status", "--porcelain", "_共享"], cwd=WORKSPACE_ROOT)
+    if rc == 0 and shared_status.strip():
+        add_paths.append("_共享")
+        print(f"📦 检测到 _共享/ 改动(可能为 GKB 晋升),一并 add")
+
+    run(["git", "add"] + add_paths, cwd=WORKSPACE_ROOT)
 
     # commit(shell=False,避免命令注入)
     full_msg = f"{msg}\n\nApproved-by: PM\nReviewed-by: agent"

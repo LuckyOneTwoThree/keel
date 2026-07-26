@@ -7,7 +7,7 @@ PM-Playbook v3.0 校验脚本
 
 校验规则(对应 v3.0 设计方案 §2.3):
   - 编号唯一(per-project 作用域): 硬阻断
-  - 编号连续(建议 max+1): 仅警告(已降级为静默,见 check_continuity 注释)
+  - 编号连续(建议 max+1): 已废弃(作废/砍需求导致合法跳号,唯一性校验已足够,见 check_continuity 注释)
   - 悬空引用(draft:false 时): 硬阻断
   - 悬空引用(draft:true 时): 仅警告
   - 状态枚举: 硬阻断(已作废/已推翻/已晋升 前缀豁免)
@@ -28,6 +28,9 @@ PM-Playbook v3.0 校验脚本
   - doc ref 悬空(非 draft): 警告(软关联,允许先写 PRD 后立 REQ)
   - req artifacts 路径不存在(非 draft): 警告
   - 作废指向悬空(已作废(误)→XXX-XXXX 中 XXX-XXXX 不存在,非 draft): 警告
+  - doc 文件名与 subtype 不一致(如 subtype=prd 但文件名不含 PRD): 警告
+  - doc 文件位置与 subtype 不一致(如 subtype=prd 但不在 01-需求/ 下): 警告
+  - doc ref 与文件名编号不一致(如 REQ-0002-PRD.md 但 ref: REQ-0001): 警告
 
 退出码:
   0 = 全部通过(可有警告)
@@ -639,6 +642,126 @@ def check_archived_pointer(entries, project_name):
             )
     return warnings
 
+# ========== P3:doc 文件一致性校验(警告级) ==========
+
+# subtype → (期望文件名片段, 期望所在目录名)
+# 文件名片段用大写英文或中文,与模板命名约定一致
+SUBTYPE_NAMING = {
+    "prd":        ("PRD",   "01-需求"),
+    "research":   ("调研",  "02-调研"),
+    "plan":       ("方案",  "03-方案"),
+    "review":     ("评审",  "04-评审"),
+    "acceptance": ("验收",  "05-验收"),
+    # report 子类型用日期命名(如 周报-2026-W30.md),不校验文件名/位置一致性
+}
+
+def _scan_doc_files(project_dir):
+    """扫项目下所有 doc 类型 .md 文件,返回 [(fpath, fm), ...]"""
+    docs = []
+    for root, dirs, files in os.walk(project_dir):
+        if ".draft" in Path(root).parts:
+            continue
+        for f in files:
+            if not f.endswith(".md") or f == "_模板.md":
+                continue
+            fpath = os.path.join(root, f)
+            try:
+                with open(fpath, encoding="utf-8") as fp:
+                    content = fp.read()
+            except Exception:
+                continue
+            content_clean = re.sub(r"```[a-zA-Z]*\n.*?\n```", "", content, flags=re.DOTALL)
+            if not content_clean.startswith("---"):
+                continue
+            fm, _ = parse_frontmatter(content_clean)
+            if not fm or fm.get("type") != "doc":
+                continue
+            docs.append((fpath, fm))
+    return docs
+
+def check_doc_filename_subtype(project_dir, project_name):
+    """P3-A:校验 doc 文件名与 subtype 一致性。仅警告。
+
+    例:subtype=prd 的文件名应含 "PRD";subtype=research 应含 "调研"。
+    report 子类型用日期命名,不校验。
+    """
+    warnings = []
+    for fpath, fm in _scan_doc_files(project_dir):
+        subtype = fm.get("subtype", "")
+        if subtype not in SUBTYPE_NAMING:
+            continue  # report 或未知 subtype(未知由 check_doc_files 硬阻断)
+        expected_fragment, _ = SUBTYPE_NAMING[subtype]
+        fname = os.path.basename(fpath)
+        if expected_fragment not in fname:
+            warnings.append(
+                f"[{project_name}] doc 文件名与 subtype 不一致: {fpath}\n"
+                f"  subtype: '{subtype}'\n"
+                f"  文件名应含: '{expected_fragment}'\n"
+                f"  当前文件名: '{fname}'"
+            )
+    return warnings
+
+def check_doc_location_subtype(project_dir, project_name):
+    """P3-B:校验 doc 文件所在目录与 subtype 一致性。仅警告。
+
+    例:subtype=prd 应在 文档库/01-需求/ 下;subtype=acceptance 应在 05-验收/ 下。
+    report 子类型不校验(周报落 07-报告/)。
+    """
+    warnings = []
+    for fpath, fm in _scan_doc_files(project_dir):
+        subtype = fm.get("subtype", "")
+        if subtype not in SUBTYPE_NAMING:
+            continue
+        _, expected_dir = SUBTYPE_NAMING[subtype]
+        # 提取相对 文档库/ 的路径,找一级子目录
+        fpath_obj = Path(fpath)
+        parts = fpath_obj.parts
+        if "文档库" not in parts:
+            continue  # 不在 文档库/ 下,由其他规则管
+        doclib_idx = parts.index("文档库")
+        if doclib_idx + 1 >= len(parts):
+            continue  # 直接在 文档库/ 根下
+        actual_dir = parts[doclib_idx + 1]
+        if actual_dir != expected_dir:
+            warnings.append(
+                f"[{project_name}] doc 文件位置与 subtype 不一致: {fpath}\n"
+                f"  subtype: '{subtype}'\n"
+                f"  期望目录: 文档库/{expected_dir}/\n"
+                f"  实际目录: 文档库/{actual_dir}/"
+            )
+    return warnings
+
+def check_doc_ref_filename_consistency(project_dir, project_name):
+    """P3-C:校验 doc 文件的 ref 与文件名编号一致性。仅警告。
+
+    例:REQ-0001-PRD.md 的 ref: REQ-0001 应与文件名编号 0001 一致。
+    防止 PM 复制文件后忘改 ref,导致 PRD 关联到错误的 REQ。
+    """
+    warnings = []
+    for fpath, fm in _scan_doc_files(project_dir):
+        ref = fm.get("ref", "")
+        if not ref:
+            continue
+        # 从 ref 提取编号(如 REQ-0001)
+        m_ref = re.match(r"^([A-Z]+)-(\d{4})$", ref)
+        if not m_ref:
+            continue
+        ref_num = m_ref.group(2)
+        # 从文件名提取编号(如 REQ-0001-PRD.md → 0001)
+        fname = os.path.basename(fpath)
+        m_fname = re.search(r"(\d{4})", fname)
+        if not m_fname:
+            continue  # 文件名无 4 位编号(可能是中文命名,跳过)
+        fname_num = m_fname.group(1)
+        if ref_num != fname_num:
+            warnings.append(
+                f"[{project_name}] doc ref 与文件名编号不一致: {fpath}\n"
+                f"  ref: '{ref}'(编号 {ref_num})\n"
+                f"  文件名编号: {fname_num}\n"
+                f"  (可能是复制文件后忘改 ref,导致 PRD 关联到错误的 REQ)"
+            )
+    return warnings
+
 # ========== 主入口 ==========
 
 def check_project(project_dir, project_name=None):
@@ -672,13 +795,18 @@ def check_project(project_dir, project_name=None):
     warnings += draft_warn
 
     # 警告级校验
-    warnings += check_continuity(entries, project_name)
+    # check_continuity 已废弃(作废/砍需求/草稿删除都会导致合法跳号,
+    # 唯一性校验已足够检测真问题),不再调用——见函数注释
     warnings += check_sorting(entries, project_name)
     # P3 新增:ref/artifacts/作废指向 悬空校验(警告级)
     all_ids = {e["entry_id"] for e in entries}
     warnings += check_dangling_doc_refs(Path(project_dir), project_name, all_ids)
     warnings += check_artifacts_path(entries, Path(project_dir), project_name)
     warnings += check_archived_pointer(entries, project_name)
+    # P3 新增:doc 文件一致性校验(文件名/位置/ref 与 subtype 一致性)
+    warnings += check_doc_filename_subtype(Path(project_dir), project_name)
+    warnings += check_doc_location_subtype(Path(project_dir), project_name)
+    warnings += check_doc_ref_filename_consistency(Path(project_dir), project_name)
 
     return errors, warnings
 

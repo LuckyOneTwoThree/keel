@@ -541,6 +541,132 @@ def test_archived_pointer_no_arrow_skip():
     assert warns == []
 
 
+# ========== check_doc_filename_subtype (P3-A 新增) ==========
+
+def test_doc_filename_subtype_match_pass(tmp_path):
+    """P3-A:doc 文件名含期望片段通过(如 subtype=prd + 文件名含 PRD)"""
+    from check import check_doc_filename_subtype
+    f = tmp_path / "REQ-0001-PRD.md"
+    f.write_text(
+        "---\ntype: doc\nsubtype: prd\n---\n# 标题\n", encoding="utf-8"
+    )
+    assert check_doc_filename_subtype(tmp_path, "TEST") == []
+
+
+def test_doc_filename_subtype_mismatch_warn(tmp_path):
+    """P3-A:doc 文件名不含期望片段警告(如 subtype=prd 但文件名不含 PRD)"""
+    from check import check_doc_filename_subtype
+    f = tmp_path / "REQ-0001-需求文档.md"  # 不含 PRD
+    f.write_text(
+        "---\ntype: doc\nsubtype: prd\n---\n# 标题\n", encoding="utf-8"
+    )
+    warns = check_doc_filename_subtype(tmp_path, "TEST")
+    assert len(warns) == 1
+    assert "PRD" in warns[0]
+
+
+def test_doc_filename_subtype_research_pass(tmp_path):
+    """P3-A:subtype=research + 文件名含"调研"通过"""
+    from check import check_doc_filename_subtype
+    f = tmp_path / "REQ-0001-调研.md"
+    f.write_text(
+        "---\ntype: doc\nsubtype: research\n---\n# 标题\n", encoding="utf-8"
+    )
+    assert check_doc_filename_subtype(tmp_path, "TEST") == []
+
+
+def test_doc_filename_subtype_report_skip(tmp_path):
+    """P3-A:report 子类型不校验文件名(用日期命名)"""
+    from check import check_doc_filename_subtype
+    f = tmp_path / "2026-W30-周报.md"
+    f.write_text(
+        "---\ntype: doc\nsubtype: report\n---\n# 周报\n", encoding="utf-8"
+    )
+    assert check_doc_filename_subtype(tmp_path, "TEST") == []
+
+
+# ========== check_doc_location_subtype (P3-B 新增) ==========
+
+def test_doc_location_subtype_match_pass(tmp_path):
+    """P3-B:subtype=prd 在 01-需求/ 下通过"""
+    from check import check_doc_location_subtype
+    docs = tmp_path / "文档库" / "01-需求"
+    docs.mkdir(parents=True)
+    (docs / "REQ-0001-PRD.md").write_text(
+        "---\ntype: doc\nsubtype: prd\n---\n# 标题\n", encoding="utf-8"
+    )
+    assert check_doc_location_subtype(tmp_path, "TEST") == []
+
+
+def test_doc_location_subtype_mismatch_warn(tmp_path):
+    """P3-B:subtype=prd 但在 03-方案/ 下警告"""
+    from check import check_doc_location_subtype
+    docs = tmp_path / "文档库" / "03-方案"
+    docs.mkdir(parents=True)
+    (docs / "REQ-0001-PRD.md").write_text(
+        "---\ntype: doc\nsubtype: prd\n---\n# 标题\n", encoding="utf-8"
+    )
+    warns = check_doc_location_subtype(tmp_path, "TEST")
+    assert len(warns) == 1
+    assert "01-需求" in warns[0]
+
+
+def test_doc_location_subtype_acceptance_pass(tmp_path):
+    """P3-B:subtype=acceptance 在 05-验收/ 下通过"""
+    from check import check_doc_location_subtype
+    docs = tmp_path / "文档库" / "05-验收"
+    docs.mkdir(parents=True)
+    (docs / "REQ-0001-验收.md").write_text(
+        "---\ntype: doc\nsubtype: acceptance\n---\n# 标题\n", encoding="utf-8"
+    )
+    assert check_doc_location_subtype(tmp_path, "TEST") == []
+
+
+# ========== check_doc_ref_filename_consistency (P3-C 新增) ==========
+
+def test_doc_ref_filename_match_pass(tmp_path):
+    """P3-C:doc ref 编号与文件名编号一致通过(REQ-0001-PRD.md + ref: REQ-0001)"""
+    from check import check_doc_ref_filename_consistency
+    f = tmp_path / "REQ-0001-PRD.md"
+    f.write_text(
+        "---\ntype: doc\nsubtype: prd\nref: REQ-0001\n---\n# 标题\n", encoding="utf-8"
+    )
+    assert check_doc_ref_filename_consistency(tmp_path, "TEST") == []
+
+
+def test_doc_ref_filename_mismatch_warn(tmp_path):
+    """P3-C:doc ref 编号与文件名编号不一致警告(REQ-0002-PRD.md 但 ref: REQ-0001)"""
+    from check import check_doc_ref_filename_consistency
+    f = tmp_path / "REQ-0002-PRD.md"  # 文件名编号 0002
+    f.write_text(
+        "---\ntype: doc\nsubtype: prd\nref: REQ-0001\n---\n# 标题\n", encoding="utf-8"
+    )
+    warns = check_doc_ref_filename_consistency(tmp_path, "TEST")
+    assert len(warns) == 1
+    assert "0001" in warns[0]
+    assert "0002" in warns[0]
+
+
+def test_doc_ref_filename_no_ref_skip(tmp_path):
+    """P3-C:无 ref 的 doc 文件不校验(report 子类型)"""
+    from check import check_doc_ref_filename_consistency
+    f = tmp_path / "2026-W30-周报.md"
+    f.write_text(
+        "---\ntype: doc\nsubtype: report\n---\n# 周报\n", encoding="utf-8"
+    )
+    assert check_doc_ref_filename_consistency(tmp_path, "TEST") == []
+
+
+def test_doc_ref_filename_no_num_in_name_skip(tmp_path):
+    """P3-C:文件名无 4 位编号时跳过(中文命名如 调研.md)"""
+    from check import check_doc_ref_filename_consistency
+    f = tmp_path / "调研.md"  # 无 4 位编号
+    f.write_text(
+        "---\ntype: doc\nsubtype: research\nref: REQ-0001\n---\n# 标题\n", encoding="utf-8"
+    )
+    assert check_doc_ref_filename_consistency(tmp_path, "TEST") == []
+
+
 # ========== 兼容直接运行(无 pytest) ==========
 
 if __name__ == "__main__":

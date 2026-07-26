@@ -10,9 +10,10 @@ import os
 import tempfile
 from pathlib import Path
 
-# 让 test 能 import pm
+# 让 test 能 import pm 和 check
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from pm import replace_draft_flag, scan_max_id
+from pm import replace_draft_flag, scan_max_id, DEFAULT_STATUS
+from check import ALLOWED_STATUS
 
 
 # ========== replace_draft_flag ==========
@@ -140,6 +141,64 @@ def test_scan_max_id_multiple_prefixes(tmp_path):
     )
     assert scan_max_id(tmp_path, "REQ") == 1
     assert scan_max_id(tmp_path, "DEC") == 5
+
+
+def test_scan_max_id_includes_draft_filenames(tmp_path):
+    """P1-A 修复:.draft/ 下的草稿文件名编号被扫到,防连续 new-req 覆盖草稿。
+
+    场景:已有 REQ-0005 草稿在 .draft/draft-req-0005-prd.md,
+    再次 pm new-req 时新编号应为 0006,而非 0001(覆盖草稿)。
+    """
+    (tmp_path / "a.md").write_text(
+        "---\nid: REQ-0003\n---\n", encoding="utf-8"
+    )
+    draft_dir = tmp_path / ".draft"
+    draft_dir.mkdir()
+    # 草稿文件名带 REQ-0005(P1-A 修复点:文件名编号应被扫到)
+    (draft_dir / "draft-req-0005-prd.md").write_text(
+        "---\nid: REQ-0005\ndraft: true\n---\n草稿正文", encoding="utf-8"
+    )
+    # 应扫到 5(文件名编号),不是 3(正文编号)
+    assert scan_max_id(tmp_path, "REQ") == 5
+
+
+def test_scan_max_id_draft_content_not_scanned(tmp_path):
+    """P1-A 边界:.draft/ 下的草稿**正文**里的编号不被扫(防误扫引用)。
+
+    场景:草稿正文里引用了 REQ-9999(尚未立的条目),
+    该引用编号不应被误扫为最大编号(否则会跳号)。
+    """
+    (tmp_path / "a.md").write_text(
+        "---\nid: REQ-0003\n---\n", encoding="utf-8"
+    )
+    draft_dir = tmp_path / ".draft"
+    draft_dir.mkdir()
+    # 草稿文件名无 REQ-XXXX 编号,但正文引用了 REQ-9999
+    (draft_dir / "draft.md").write_text(
+        "---\nid: REQ-0005\ndraft: true\n---\n相关: REQ-9999(未立条目)", encoding="utf-8"
+    )
+    # 应扫到 3(正文里 a.md 的 REQ-0003),不是 9999(草稿正文引用)
+    assert scan_max_id(tmp_path, "REQ") == 3
+
+
+# ========== DEFAULT_STATUS(P1-C 修复) ==========
+
+def test_default_status_covers_all_types():
+    """P1-C:DEFAULT_STATUS 覆盖全部 8 种条目类型"""
+    expected_types = {"req", "prg", "dec", "com", "kb", "rsk", "dep", "gkb"}
+    assert set(DEFAULT_STATUS.keys()) == expected_types
+
+
+def test_default_status_all_valid():
+    """P1-C:每种类型的默认 status 都在 check.py ALLOWED_STATUS 枚举里合法。
+
+    旧实现 com/kb/gkb 默认"进行中"不在各自枚举,导致 pm check 硬阻断。
+    """
+    for entry_type, default_status in DEFAULT_STATUS.items():
+        allowed = ALLOWED_STATUS.get(entry_type, set())
+        assert default_status in allowed, (
+            f"{entry_type} 默认 status '{default_status}' 不在 ALLOWED_STATUS {allowed} 里"
+        )
 
 
 # ========== 兼容直接运行(无 pytest) ==========
