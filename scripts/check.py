@@ -99,9 +99,12 @@ ALLOWED_LEVEL = {"高", "中", "低"}
 DOC_SUBTYPE = {"prd", "plan", "research", "review", "acceptance", "report"}
 
 # 类型 → 应位于的子目录(用于文件位置校验,防 RSK/DEP 错放 记忆/)
+# P1-B 修法:补 REQ(写入协议 §2.1 要求 REQ 条目必在 项目管理/需求登记册.md,
+# 旧版只校 RSK/DEP,REQ 错放无法发现)
 TYPE_FILE_LOCATION = {
     "rsk": "项目管理",  # RSK 应在 项目管理/风险登记册.md
     "dep": "项目管理",  # DEP 应在 项目管理/依赖登记册.md
+    "req": "项目管理",  # REQ 条目应在 项目管理/需求登记册.md
 }
 
 # 派生文件标记(豁免悬空校验)

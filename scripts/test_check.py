@@ -297,6 +297,30 @@ def test_file_location_dep_wrong(tmp_path):
     assert "DEP-0001" in errs[0]
 
 
+def test_file_location_req_correct(tmp_path):
+    """P1-B:REQ 条目在 项目管理/ 下通过"""
+    proj = tmp_path / "PROJ-X"
+    pm_dir = proj / "项目管理"
+    pm_dir.mkdir(parents=True)
+    fpath = pm_dir / "需求登记册.md"
+    fpath.write_text("---\nid: REQ-0001\ntype: req\n---\n", encoding="utf-8")
+    entries = [{"entry_id": "REQ-0001", "entry_type": "req", "file": str(fpath)}]
+    assert check_file_location(entries, "TEST", str(proj)) == []
+
+
+def test_file_location_req_wrong(tmp_path):
+    """P1-B:REQ 条目错放在 记忆/ 下报错"""
+    proj = tmp_path / "PROJ-X"
+    mem_dir = proj / "记忆"
+    mem_dir.mkdir(parents=True)
+    fpath = mem_dir / "需求登记册.md"
+    fpath.write_text("---\nid: REQ-0001\ntype: req\n---\n", encoding="utf-8")
+    entries = [{"entry_id": "REQ-0001", "entry_type": "req", "file": str(fpath)}]
+    errs = check_file_location(entries, "TEST", str(proj))
+    assert len(errs) == 1
+    assert "REQ-0001" in errs[0]
+
+
 # ========== check_doc_files (新增) ==========
 
 def test_doc_files_valid_subtype(tmp_path):
