@@ -350,8 +350,8 @@ def cmd_init(args):
                         flags=re.MULTILINE,
                     )
                     proj_id_count += 1
-            # 章程文件:更新 updated / date / current_milestone 为当天
-            # (date 字段对所有类型都必填,但模板日期是占位,实例化时刷成当天)
+            # 章程文件:更新 updated 为当天
+            # (updated 仅章程有,其余容器文件无此字段)
             if fpath == charter_path:
                 # updated
                 if re.search(r"^updated:\s*", new_fm, flags=re.MULTILINE):
@@ -363,7 +363,12 @@ def cmd_init(args):
                     )
                 else:
                     new_fm = new_fm.rstrip() + f"\nupdated: {today_iso}\n"
-                # date(顶层必填,刷成当天)
+            # date(顶层必填,所有容器文件刷成当天)
+            # P1 修法:旧实现只刷章程 date,导致记忆日志/登记册/路线图/干系人矩阵
+            # 的 date 仍是模板创建日(如 2026-07-25),实例化后与项目实际创建日期不符。
+            # 容器模板不能直接用 YYYY-MM-DD 占位符(check.py 校验日期格式会过不了,
+            # CI 的 _模板/ 自校验会红),所以保持有效日期 + pm init 时刷新。
+            if re.search(r"^date:\s*", new_fm, flags=re.MULTILINE):
                 new_fm = re.sub(
                     r"^(date:\s*).*$",
                     rf"\g<1>{today_iso}",
@@ -376,7 +381,8 @@ def cmd_init(args):
     if proj_id_count:
         print(f"✅ 已为 {proj_id_count} 个文件补 proj_id: {proj_name}")
     if charter_path.exists():
-        print(f"✅ 已刷新项目章程 updated/date: {today_iso}")
+        print(f"✅ 已刷新项目章程 updated: {today_iso}")
+    print(f"✅ 已刷新所有容器文件 date: {today_iso}")
 
     # 确保 .draft/ 存在
     (target_dir / ".draft").mkdir(exist_ok=True)
