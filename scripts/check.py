@@ -891,10 +891,28 @@ def check_project(project_dir, project_name=None):
     warnings = []
 
     entries = find_entries(project_dir)
+
+    # ===== 文档(doc)级校验:不依赖条目级 frontmatter,无条件执行 =====
+    # P1 修法:旧实现在 `if not entries: return` 之后才跑 doc 校验,导致
+    # "还没立任何 REQ 的新项目"整类 doc 校验被静默跳过——subtype 非法、
+    # ref 悬空、文件名/位置不一致全部报不出来。
+    # 而第 4 条地基约束恰恰鼓励"PRD 可先写、REQ 事后补",该路径正落在盲区里。
+    # 另:CI 的"校验 _模板/ 自身"一步也因模板无条目级 FM 而近似空转。
+    errors += check_doc_files(project_dir, project_name)
+
+    all_ids = {e["entry_id"] for e in entries}
+    warnings += check_dangling_doc_refs(Path(project_dir), project_name, all_ids)
+    warnings += check_doc_filename_subtype(Path(project_dir), project_name)
+    warnings += check_doc_location_subtype(Path(project_dir), project_name)
+    warnings += check_doc_ref_filename_consistency(Path(project_dir), project_name)
+    warnings += check_doc_report_filename(Path(project_dir), project_name)
+
     if not entries:
+        # 无条目级数据 → 跳过条目级校验(唯一性/悬空引用/老化/排序等),
+        # 但上面的 doc 级校验已跑完。
         return errors, warnings
 
-    # 硬阻断校验
+    # ===== 条目级校验:硬阻断优先 =====
     errors += check_unique_ids(entries, project_name)
     req_err, req_warn = check_required_fields(entries, project_name)
     errors += req_err
@@ -905,7 +923,6 @@ def check_project(project_dir, project_name=None):
     errors += check_status_enum(entries, project_name)
     errors += check_date_format(entries, project_name)
     errors += check_file_location(entries, project_name, project_dir)
-    errors += check_doc_files(project_dir, project_name)
     dangling_err, dangling_warn = check_dangling_refs(entries, project_name)
     errors += dangling_err
     warnings += dangling_warn
@@ -913,21 +930,12 @@ def check_project(project_dir, project_name=None):
     errors += draft_err
     warnings += draft_warn
 
-    # 警告级校验
+    # ===== 警告级校验 =====
     # check_continuity 已废弃(作废/砍需求/草稿删除都会导致合法跳号,
     # 唯一性校验已足够检测真问题),不再调用——见函数注释
     warnings += check_sorting(entries, project_name)
-    # P3 新增:ref/artifacts/作废指向 悬空校验(警告级)
-    all_ids = {e["entry_id"] for e in entries}
-    warnings += check_dangling_doc_refs(Path(project_dir), project_name, all_ids)
     warnings += check_artifacts_path(entries, Path(project_dir), project_name)
     warnings += check_archived_pointer(entries, project_name)
-    # P3 新增:doc 文件一致性校验(文件名/位置/ref 与 subtype 一致性)
-    warnings += check_doc_filename_subtype(Path(project_dir), project_name)
-    warnings += check_doc_location_subtype(Path(project_dir), project_name)
-    warnings += check_doc_ref_filename_consistency(Path(project_dir), project_name)
-    # P2-9:report 子类型文件名格式校验
-    warnings += check_doc_report_filename(Path(project_dir), project_name)
 
     return errors, warnings
 

@@ -105,24 +105,35 @@ def parse_frontmatter_simple(content):
     return fm or {}
 
 def is_derived_file(fpath):
-    """检查是否是派生文件(豁免编号扫描)"""
-    try:
-        with open(fpath, encoding="utf-8") as fp:
-            content = fp.read(500)
-        return "derived: true" in content
-    except:
-        return False
+    """检查是否是派生文件(豁免编号扫描)。
 
-def replace_draft_flag(content, target_id):
+    P1 修法:旧实现只读前 500 字节做子串匹配 `derived: true`,与 check.py 的
+    精确实现(P1 修法:解析 frontmatter 后判断字段值)分叉。同名函数两处实现不同,
+    任何正文前 500 字节出现该字符串的文件会被整文件跳过 scan_max_id 编号扫描
+    → 可能导致编号重复分配。现直接委托 check.py,消除分叉(单一真相源)。
+    """
+    from check import is_derived_file as _check_is_derived_file
+    return _check_is_derived_file(fpath)
+
+def replace_draft_flag(content, target_id, ref_only=False):
     """在含 target_id 的 frontmatter 块里把 draft: true → false。
     避免多条目文件里误改其他条目的 draft 字段(P0-1 修法)。
-    返回 (new_content, replaced: bool)"""
+    返回 (new_content, replaced: bool)
+
+    ref_only 参数(配合 P0 修法):
+      条目级文件用 `id: <target>` 定位(默认);
+      文档级文件(如 PRD)无 id,用 `ref: <target>` 关联 REQ-XXXX(写入协议 §2.2),
+      故需 ref_only=True 才能定位到它的 frontmatter 块。
+    """
     lines = content.split("\n")
-    # 找 target_id 所在行
+    # 找 target_id 所在行(id 或 ref,由 ref_only 决定)
+    if ref_only:
+        matchers = (f"ref: {target_id}", f"ref:{target_id}")
+    else:
+        matchers = (f"id: {target_id}", f"id:{target_id}")
     id_line_idx = None
     for i, line in enumerate(lines):
-        stripped = line.strip()
-        if stripped == f"id: {target_id}" or stripped == f"id:{target_id}":
+        if line.strip() in matchers:
             id_line_idx = i
             break
     if id_line_idx is None:
@@ -149,6 +160,18 @@ def replace_draft_flag(content, target_id):
             lines[i] = lines[i].replace("draft: true", "draft: false", 1)
             return "\n".join(lines), True
     return content, False
+
+def is_prd_doc(content):
+    """判断内容是否为文档级 PRD 文件(type: doc + subtype: prd)。
+
+    P0 修法配套:PRD 是文档级条目(无 id,用 ref 关联 REQ-XXXX),
+    cmd_finalize 需据此选择按 ref(而非 id)定位 frontmatter 块。
+    """
+    cleaned = re.sub(r"```[a-zA-Z]*\n.*?\n```", "", content, flags=re.DOTALL)
+    if not cleaned.startswith("---"):
+        return False
+    fm = parse_frontmatter_simple(cleaned)
+    return fm.get("type") == "doc" and fm.get("subtype") == "prd"
 
 def scan_max_id(project_dir, prefix):
     """扫项目所有 .md,找某前缀的最大编号。
@@ -224,7 +247,7 @@ def extract_entries_from_file(fpath):
 # ============ 命令实现 ============
 
 def insert_entry_after_marker(content, fm_text, body):
-    """把新条目(fm + body)插入到多条目文件的合适位置。
+    r"""把新条目(fm + body)插入到多条目文件的合适位置。
     优先级递减:
       ① 找 "<!-- 在此追加条目" 注释,在注释行之后插入
       ② fallback:用 extract_frontmatter_blocks 找第一个真实条目块(跳过文件头 FM),
@@ -478,15 +501,45 @@ def cmd_new(args):
     # 决定写入位置
     if entry_type == "req":
         # req 特殊处理:同时写两份
-        # ① .draft/draft-req-XXXX-prd.md(PRD 草稿,doc 文件)
-        # ② 项目管理/需求登记册.md(REQ 条目,真相源)
+        # ① .draft/draft-req-XXXX-prd.md(PRD 草稿,**文档级** doc 文件)
+        # ② 项目管理/需求登记册.md(REQ 条目,**条目级**,真相源)
         # 两份都标 draft:true,pm finalize <REQ-ID> 时同时翻 draft
+        #
+        # P0 修法:PRD 草稿不能复用条目级 fm_text。
+        # 旧实现把 `id: REQ-XXXX` + `type: req` 写进 PRD,定稿搬到 文档库/01-需求/
+        # 后立刻触发 2 个硬阻断:① 编号与需求登记册撞号(check_unique_ids)
+        # ② check_file_location 要求 req 必在 项目管理/ 下。
+        # 现按 写入协议 §2.2 文档级 schema 生成:type: doc + subtype: prd + ref 关联。
         draft_dir = project_dir / ".draft"
         draft_dir.mkdir(exist_ok=True)
         draft_file = draft_dir / f"draft-req-{new_num:04d}-prd.md"
-        prd_body = f"\n### {new_id} — {today}\n{title}\n\n(待补全正文)\n"
+        prd_fm = "\n".join([
+            "---",
+            "type: doc",
+            "subtype: prd",
+            f"title: {title}",
+            f"date: {today}",
+            f"ref: {new_id}",
+            f"proj_id: {project_dir.name}",
+            "related: []",
+            "related_external: []",
+            "draft: true",
+            "---",
+        ])
+        # 正文结构与 _模板/文档库/01-需求/_模板.md 对齐,PM 直接填写
+        prd_body = (
+            f"\n# {new_id} — 需求文档\n\n"
+            f"> 复制本文为 `{new_id}-PRD.md` 后填写。\n"
+            f"> 条目级元信息(id/status/scope/related/artifacts)在 `项目管理/需求登记册.md`,本文件只放详情。\n\n"
+            f"## 1. 背景与问题\n"
+            f"## 2. 目标与非目标\n"
+            f"## 3. 用户与场景\n"
+            f"## 4. 需求详述(功能点)\n"
+            f"## 5. 需求侧验收标准\n"
+            f"## 6. 开放问题\n"
+        )
         with open(draft_file, "w", encoding="utf-8") as fp:
-            fp.write(fm_text + prd_body)
+            fp.write(prd_fm + prd_body)
         print(f"✅ 已创建 PRD 草稿: {draft_file}")
         print(f"   编号: {new_id}")
         print(f"   状态: draft:true (PM 定稿时跑 pm finalize {new_id})")
@@ -1184,7 +1237,11 @@ def cmd_finalize(args):
             if "draft: true" not in content:
                 continue
             # 按块定位替换(避免多条目文件里误改其他条目,P0-1 修法)
-            new_content, replaced = replace_draft_flag(content, target_id)
+            # P0 修法:PRD 是文档级条目(无 id,用 ref 关联 REQ-XXXX),
+            # 必须按 ref 定位;条目级文件(登记册里的 REQ 条目)仍按 id 定位。
+            new_content, replaced = replace_draft_flag(
+                content, target_id, ref_only=is_prd_doc(content)
+            )
             if not replaced:
                 continue
             # 如果是 .draft/ 下的 PRD,移到正式位
